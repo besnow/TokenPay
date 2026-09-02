@@ -3,7 +3,7 @@ using TokenPay.Extensions;
 
 namespace TokenPay.Models.EthModel
 {
-#pragma warning disable CS8618 // ÔÚÍË³ö¹¹Ôìº¯ÊıÊ±£¬²»¿ÉÎª null µÄ×Ö¶Î±ØĞë°üº¬·Ç null Öµ¡£Çë¿¼ÂÇÉùÃ÷Îª¿ÉÒÔÎª null¡£
+#pragma warning disable CS8618 // åœ¨é€€å‡ºæ„é€ å‡½æ•°æ—¶ï¼Œä¸å¯ä¸º null çš„å­—æ®µå¿…é¡»åŒ…å«é null å€¼ã€‚è¯·è€ƒè™‘å£°æ˜ä¸ºå¯ä»¥ä¸º nullã€‚
     public class ERC20Transaction
     {
         [JsonProperty("blockNumber")]
@@ -47,6 +47,9 @@ namespace TokenPay.Models.EthModel
         [JsonProperty("transactionIndex")]
         public int TransactionIndex { get; set; }
 
+        [JsonProperty("logIndex")]
+        public int LogIndex { get; set; }
+
         [JsonProperty("gas")]
         public decimal Gas { get; set; }
 
@@ -65,5 +68,5 @@ namespace TokenPay.Models.EthModel
         [JsonProperty("confirmations")]
         public decimal Confirmations { get; set; }
     }
-#pragma warning restore CS8618 // ÔÚÍË³ö¹¹Ôìº¯ÊıÊ±£¬²»¿ÉÎª null µÄ×Ö¶Î±ØĞë°üº¬·Ç null Öµ¡£Çë¿¼ÂÇÉùÃ÷Îª¿ÉÒÔÎª null¡£
+#pragma warning restore CS8618 // åœ¨é€€å‡ºæ„é€ å‡½æ•°æ—¶ï¼Œä¸å¯ä¸º null çš„å­—æ®µå¿…é¡»åŒ…å«é null å€¼ã€‚è¯·è€ƒè™‘å£°æ˜ä¸ºå¯ä»¥ä¸º nullã€‚
 }

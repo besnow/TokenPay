@@ -6,6 +6,7 @@ using TokenPay.Domains;
 using TokenPay.Extensions;
 using TokenPay.Helper;
 using TokenPay.Models.EthModel;
+using TokenPay.Services;
 
 namespace TokenPay.BgServices
 {
@@ -16,6 +17,7 @@ namespace TokenPay.BgServices
         private readonly Channel<TokenOrders> _channel;
         private readonly List<EVMChain> _chains;
         private readonly IFreeSql freeSql;
+        private readonly IStaticPaymentMatcher matcher;
         private bool UseDynamicAddress => _configuration.GetValue("UseDynamicAddress", true);
         private bool UseDynamicAddressAmountMove => _configuration.GetValue("DynamicAddressConfig:AmountMove", false);
         public OrderCheckEVMBaseService(ILogger<OrderCheckEVMBaseService> logger,
@@ -23,13 +25,14 @@ namespace TokenPay.BgServices
             IHostEnvironment env,
             Channel<TokenOrders> channel,
             List<EVMChain> Chains,
-            IFreeSql freeSql) : base("EVM基本币订单检测", TimeSpan.FromSeconds(15), logger)
+            IFreeSql freeSql, IStaticPaymentMatcher matcher) : base("EVM基本币订单检测", TimeSpan.FromSeconds(15), logger)
         {
             this._configuration = configuration;
             this._env = env;
             this._channel = channel;
             _chains = Chains;
             this.freeSql = freeSql;
+            this.matcher = matcher;
         }
 
         protected override async Task ExecuteAsync(DateTime RunTime, CancellationToken stoppingToken)
@@ -93,6 +96,12 @@ namespace TokenPay.BgServices
                         Func<EthTransaction, Task> CheckOrder = async (EthTransaction item) =>
                         {
                             var RealAmount = item.RealAmount(chain.Decimals);
+                            if (!UseDynamicAddress)
+                            {
+                                await matcher.ObserveAsync(new(chain.ChainNameEN, Currency, null, item.Hash, 0,
+                                    item.From, address, RealAmount, item.BlockNumber, item.DateTime, item.Confirmations), stoppingToken);
+                                return;
+                            }
                             var order = orders.Where(x => x.Amount == RealAmount && x.ToAddress.ToLower() == item.To.ToLower() && x.CreateTime < item.DateTime)
                             .OrderByDescending(x => x.CreateTime)//优先付最后一单
                                 .FirstOrDefault();

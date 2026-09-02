@@ -18,6 +18,8 @@ using TokenPay.Controllers;
 using TokenPay.Domains;
 using TokenPay.Helper;
 using TokenPay.Models.EthModel;
+using TokenPay.Models;
+using TokenPay.Services;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Override("Microsoft", LogEventLevel.Information)
@@ -108,7 +110,10 @@ IFreeSql fsql = new FreeSqlBuilder()
 Services.AddSingleton(fsql);
 Services.AddScoped<UnitOfWorkManager>();
 Services.AddFreeRepository();
+Services.Configure<StaticPaymentMatchOptions>(Configuration.GetSection(StaticPaymentMatchOptions.SectionName));
+Services.AddSingleton<IStaticPaymentMatcher, StaticPaymentMatcher>();
 Services.AddHostedService<OrderExpiredService>();
+Services.AddHostedService<StaticPaymentRetryService>();
 Services.AddHostedService<UpdateRateService>();
 Services.AddHostedService<OrderNotifyService>();
 Services.AddHostedService<OrderPaySuccessService>();

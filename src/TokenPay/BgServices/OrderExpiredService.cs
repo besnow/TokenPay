@@ -22,7 +22,11 @@ namespace TokenPay.BgServices
 
             var ExpireTime = _configuration.GetValue("ExpireTime", 10 * 60);
             var ExpireDateTime = DateTime.Now.AddSeconds(-1 * ExpireTime);
-            var ExpiredOrders = await _repository.Where(x => x.CreateTime < ExpireDateTime && x.Status == OrderStatus.Pending).ToListAsync();
+            var staticRetention = _configuration.GetValue("StaticPaymentMatch:LatePaymentRetentionHours", 24);
+            var staticExpireDateTime = DateTime.UtcNow.AddHours(-staticRetention);
+            var ExpiredOrders = await _repository.Where(x => x.Status == OrderStatus.Pending)
+                .Where(x => (!x.IsStaticAddress && x.CreateTime < ExpireDateTime) || (x.IsStaticAddress && x.CreateTime < staticExpireDateTime))
+                .ToListAsync();
             foreach (var order in ExpiredOrders)
             {
                 _logger.LogInformation("订单[{c}]过期了！", order.Id);

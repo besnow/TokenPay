@@ -10,8 +10,10 @@ using System.Reflection;
 using TokenPay.Domains;
 using TokenPay.Extensions;
 using TokenPay.Helper;
-using TokenPay.Models;
 using TokenPay.Models.EthModel;
+using TokenPay.Models;
+using TokenPay.Services;
+using Microsoft.Extensions.Options;
 
 namespace TokenPay.Controllers
 {
@@ -26,6 +28,8 @@ namespace TokenPay.Controllers
         private readonly IHostEnvironment _env;
         private readonly ILogger<HomeController> _logger;
         private readonly IConfiguration _configuration;
+        private readonly IStaticPaymentMatcher _staticMatcher;
+        private readonly StaticPaymentMatchOptions _staticOptions;
         private FiatCurrency BaseCurrency => Enum.Parse<FiatCurrency>(_configuration.GetValue("BaseCurrency", "CNY")!);
         public static int GetDecimals(string currency, IConfiguration _configuration)
         {
@@ -90,7 +94,7 @@ namespace TokenPay.Controllers
             List<EVMChain> chain,
             IHostEnvironment env,
             ILogger<HomeController> logger,
-            IConfiguration configuration)
+            IConfiguration configuration, IStaticPaymentMatcher staticMatcher, IOptions<StaticPaymentMatchOptions> staticOptions)
         {
             this._repository = repository;
             this._rateRepository = rateRepository;
@@ -99,6 +103,8 @@ namespace TokenPay.Controllers
             this._env = env;
             this._logger = logger;
             this._configuration = configuration;
+            this._staticMatcher = staticMatcher;
+            this._staticOptions = staticOptions.Value;
         }
         [Route("/")]
         public IActionResult Index()
@@ -115,11 +121,14 @@ namespace TokenPay.Controllers
             }
             ViewData["QrCode"] = Convert.ToBase64String(CreateQrCode(order.ToAddress));
             var ExpireTime = _configuration.GetValue("ExpireTime", 10 * 60);
-            if (DateTime.Now > order.CreateTime.AddSeconds(ExpireTime) || order.Status == OrderStatus.Expired)
+            var effectiveExpire = order.IsStaticAddress
+                ? order.CreateTime.AddHours(_staticOptions.LatePaymentRetentionHours)
+                : order.CreateTime.AddSeconds(ExpireTime);
+            if (DateTime.UtcNow > effectiveExpire || order.Status == OrderStatus.Expired)
             {
                 return View("OrderExpired", order);
             }
-            ViewData["ExpireTime"] = order.CreateTime.AddSeconds(ExpireTime);
+            ViewData["ExpireTime"] = effectiveExpire;
             return View(order);
         }
         [HttpGet]
@@ -162,6 +171,14 @@ namespace TokenPay.Controllers
             if (order == null)
             {
                 return Content(OrderStatus.Pending.ToString());
+            }
+            if (order.Status == OrderStatus.Pending && order.IsStaticAddress)
+            {
+                var ambiguous = await _repository.Orm.Select<ChainPayment>()
+                    .Where(x => x.Asset == order.Currency && x.ToAddress == order.ToAddress && x.MatchStatus == PaymentMatchStatus.Ambiguous)
+                    .Where(x => x.BlockTime >= order.CreateTime && x.BlockTime <= order.CreateTime.AddHours(_staticOptions.LatePaymentRetentionHours))
+                    .AnyAsync();
+                if (ambiguous) return Content(OrderStatus.Ambiguous.ToString());
             }
             return Content(order.Status.ToString());
         }
@@ -270,9 +287,19 @@ namespace TokenPay.Controllers
                 }
                 else
                 {
-                    var (Address, Amount) = await GetUseTokenStaticAdress(model);
+                    var (Address, Amount, Rate) = await GetUseTokenStaticAdress(model);
                     order.ToAddress = Address;
                     order.Amount = Amount;
+                    order.IsStaticAddress = true;
+                    order.LockedCoinPrice = Rate;
+                    // ActualAmount is expressed in BaseCurrency; convert it to USDT using the locked USDT rate.
+                    var usdtRate = GetRate("USDT");
+                    if (usdtRate <= 0) usdtRate = await _rateRepository.Where(x => x.Currency == "USDT" && x.FiatCurrency == BaseCurrency).FirstAsync(x => x.Rate);
+                    if (usdtRate <= 0) throw new TokenPayException("USDT 汇率有误！");
+                    order.OrderValueUsdt = model.ActualAmount / usdtRate;
+                    var coinPriceUsdt = Rate / usdtRate;
+                    (order.AllowedUnderpayAmount, order.MinimumPaidAmount) = PaymentAmountCalculator.Calculate(
+                        Amount, order.OrderValueUsdt, coinPriceUsdt, _staticOptions, GetDecimals(model.Currency, _configuration));
                 }
             }
             catch (TokenPayException e)
@@ -425,7 +452,7 @@ namespace TokenPay.Controllers
         /// <param name="model"></param>
         /// <returns></returns>
         /// <exception cref="TokenPayException"></exception>
-        private async Task<(string, decimal)> GetUseTokenStaticAdress(CreateOrderViewModel model)
+        private async Task<(string, decimal, decimal)> GetUseTokenStaticAdress(CreateOrderViewModel model)
         {
             var TRON = _configuration.GetSection("Address:TRON").Get<string[]>() ?? new string[0];
             var EVM = _configuration.GetSection("Address:EVM").Get<string[]>() ?? new string[0];
@@ -456,63 +483,9 @@ namespace TokenPay.Controllers
                 throw new TokenPayException("汇率有误！");
             }
             var Amount = (model.ActualAmount / rate).ToRound(GetDecimals(model.Currency, _configuration));
-            //随机排序所有收款地址
-            CurrentAdress = CurrentAdress.OrderBy(x => Guid.NewGuid()).ToArray();
-            var UseTokenAdress = string.Empty;
-            foreach (var token in CurrentAdress)
-            {
-                //判断是否存在此金额、此地址、此币种的待付款
-                var has = await _repository
-                    .Where(x => x.ToAddress == token)
-                    //.Where(x => x.ActualAmount == order.ActualAmount) //原始金额
-                    .Where(x => x.Currency == model.Currency)//虚拟币币种
-                    .Where(x => x.Amount == Amount) //实际支付的虚拟币金额
-                    .Where(x => x.Status == OrderStatus.Pending) //代支付
-                    .AnyAsync();
-                if (!has)
-                {
-                    UseTokenAdress = token;
-                    break;
-                }
-            }
-            //所有地址都存在此金额
-            if (string.IsNullOrEmpty(UseTokenAdress))
-            {
-                var decimals = GetDecimals(model.Currency, _configuration);//根据小数位数计算递增次数，2位小数递增100次，三位小数递增1000次
-                var maxLoop = Math.Max(5, Math.Pow(10, decimals));//可能会存在0位小数的情况，限制最少递增5次
-                var AddAmount = Convert.ToDecimal(1 / maxLoop);//初始递增量
-                for (int i = 0; i < maxLoop; i++)//最多递增N次，根据精度控制
-                {
-                    foreach (var token in CurrentAdress)
-                    {
-                        //判断是否存在此金额、此地址、此币种的待付款
-                        var currentAmount = Amount + AddAmount * (i + 1);
-                        var query = _repository
-                            .Where(x => x.ToAddress == token)
-                            //.Where(x => x.ActualAmount == order.ActualAmount) //原始金额
-                            .Where(x => x.Currency == model.Currency)//虚拟币币种
-                            .Where(x => x.Amount == currentAmount) //实际支付的虚拟币金额
-                            .Where(x => x.Status == OrderStatus.Pending);
-                        var has = await query//待支付
-                            .AnyAsync();
-                        if (!has)
-                        {
-                            UseTokenAdress = token;
-                            Amount = currentAmount;
-                            break;
-                        }
-                    }
-                    if (!string.IsNullOrEmpty(UseTokenAdress))
-                    {
-                        break;
-                    }
-                }
-            }
-            if (string.IsNullOrEmpty(UseTokenAdress))
-            {
-                throw new TokenPayException("无可用收款地址！");
-            }
-            return (UseTokenAdress, Amount);
+            // Static matching is based on address/network/time uniqueness, never an amount fingerprint.
+            var UseTokenAdress = CurrentAdress[Random.Shared.Next(CurrentAdress.Length)];
+            return (UseTokenAdress, Amount, rate);
         }
 
         [Route("/CheckTron/{address}")]
@@ -569,5 +542,24 @@ namespace TokenPay.Controllers
             qrCode.GenerateImage(stream);
             return stream.ToArray();
         }
+
+        [HttpPost]
+        [Route("/payment/{id:guid}/recheck")]
+        public async Task<IActionResult> Recheck(Guid id, CancellationToken cancellationToken)
+        {
+            await _staticMatcher.RetryUnmatchedAsync(cancellationToken);
+            var order = await _repository.Where(x => x.Id == id).FirstAsync();
+            return Json(new { status = order?.Status.ToString() ?? "NotFound" });
+        }
+
+        [HttpPost]
+        [Route("/payment/{id:guid}/txid")]
+        public async Task<IActionResult> SubmitTxId(Guid id, [FromBody] TxIdClaim model, CancellationToken cancellationToken)
+        {
+            var result = await _staticMatcher.ClaimByTxIdAsync(id, model.TransactionHash, model.TransferIndex, cancellationToken);
+            return Json(new { status = result.Status.ToString(), result.Reason });
+        }
+
+        public sealed record TxIdClaim(string TransactionHash, int? TransferIndex);
     }
 }

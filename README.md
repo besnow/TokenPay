@@ -118,3 +118,9 @@ USDT-TRC20打赏地址: TKGTx4pCKiKQbk8evXHTborfZn754TGViP
 虚拟币市场行为不受监管要求和控制，投资交易需谨慎，仅供学习区块链知识
 ```
 [![Stargazers over time](https://starchart.cc/LightCountry/TokenPay.svg)](https://starchart.cc/LightCountry/TokenPay)
+
+## 静态地址到账匹配
+
+静态地址模式（`UseDynamicAddress: false`）会从订单创建时立即由后台扫描，不依赖支付页或“我已支付”按钮。到账只按**网络、币种、收款地址和时间窗口**寻找订单；金额仅用于检查是否达到订单中锁定的 `MinimumPaidAmount`，不会作为金额指纹。唯一候选自动完成，多个候选绝不猜测并要求用户提供 TxID。普通窗口为 60 分钟，60 分钟后至 24 小时为延迟到账，24 小时后转为异常到账。
+
+`StaticPaymentMatch` 配置：`Enabled` 控制该功能；`AutoWindowMinutes` 是普通窗口；`LatePaymentRetentionHours` 是延迟到账保留窗口；`MaxUnderpayUsd` 与 `MaxUnderpayPercent` 共同限制少付价值（取较小者）；`AcceptOverpay` 允许多付完成；`CreditOverpay` 必须保持 `false` 以免多付计入余额；`AmbiguousMatchAction` 默认 `RequireTxId`；`BlockTimeSkewSeconds` 仅容忍节点时间戳小幅偏差。多付部分不退回、不计入余额。

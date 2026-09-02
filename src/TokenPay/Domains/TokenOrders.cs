@@ -31,7 +31,7 @@ namespace TokenPay.Domains
         /// <summary>
         /// 订单实际支付的金额，保留2位小数
         /// </summary>
-        [Column(Precision = 15, Scale = 2)]
+        [Column(Precision = 38, Scale = 18)]
         public decimal? PayAmount { get; set; }
         /// <summary>
         /// 是否动态金额订单
@@ -53,8 +53,26 @@ namespace TokenPay.Domains
         /// <summary>
         /// 订单金额，保留4位小数
         /// </summary>
-        [Column(Precision = 15, Scale = 4)]
+        [Column(Precision = 38, Scale = 18)]
         public decimal Amount { get; set; }
+        /// <summary>创建订单时锁定的币价（基础法币/币）。</summary>
+        [Column(Precision = 38, Scale = 18)]
+        public decimal LockedCoinPrice { get; set; }
+        /// <summary>订单创建时的 USDT 等值。</summary>
+        [Column(Precision = 38, Scale = 18)]
+        public decimal OrderValueUsdt { get; set; }
+        /// <summary>允许少付的币数量。</summary>
+        [Column(Precision = 38, Scale = 18)]
+        public decimal AllowedUnderpayAmount { get; set; }
+        /// <summary>成功付款所需的最低币数量。</summary>
+        [Column(Precision = 38, Scale = 18)]
+        public decimal MinimumPaidAmount { get; set; }
+        /// <summary>静态地址订单；旧数据默认为动态地址以保持兼容。</summary>
+        public bool IsStaticAddress { get; set; }
+        /// <summary>唯一到账记录。</summary>
+        public Guid? ChainPaymentId { get; set; }
+        /// <summary>是否为 60 分钟后的延迟到账。</summary>
+        public bool IsLatePayment { get; set; }
         /// <summary>
         /// 钱包地址
         /// </summary>
@@ -88,12 +106,14 @@ namespace TokenPay.Domains
         /// 最后通知时间
         /// </summary>
         public DateTime? LastNotifyTime { get; set; }
-        public DateTime CreateTime { get; set; } = DateTime.Now;
+        public DateTime CreateTime { get; set; } = DateTime.UtcNow;
     }
     public enum OrderStatus
     {
         Pending,
         Paid,
-        Expired
+        Expired,
+        Ambiguous,
+        AmountInsufficient
     }
 }

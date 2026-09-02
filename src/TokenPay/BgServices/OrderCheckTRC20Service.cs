@@ -6,6 +6,7 @@ using TokenPay.Domains;
 using TokenPay.Extensions;
 using TokenPay.Helper;
 using TokenPay.Models.TronModel;
+using TokenPay.Services;
 
 namespace TokenPay.BgServices
 {
@@ -15,6 +16,7 @@ namespace TokenPay.BgServices
         private readonly IHostEnvironment _env;
         private readonly Channel<TokenOrders> _channel;
         private readonly IFreeSql freeSql;
+        private readonly IStaticPaymentMatcher matcher;
 
         private bool UseDynamicAddress => _configuration.GetValue("UseDynamicAddress", true);
         private bool UseDynamicAddressAmountMove => _configuration.GetValue("DynamicAddressConfig:AmountMove", false);
@@ -22,12 +24,13 @@ namespace TokenPay.BgServices
             IConfiguration configuration,
             IHostEnvironment env,
             Channel<TokenOrders> channel,
-            IFreeSql freeSql) : base("TRC20订单检测", TimeSpan.FromSeconds(3), logger)
+            IFreeSql freeSql, IStaticPaymentMatcher matcher) : base("TRC20订单检测", TimeSpan.FromSeconds(3), logger)
         {
             this._configuration = configuration;
             this._env = env;
             this._channel = channel;
             this.freeSql = freeSql;
+            this.matcher = matcher;
         }
 
         protected override async Task ExecuteAsync(DateTime RunTime, CancellationToken stoppingToken)
@@ -93,6 +96,12 @@ namespace TokenPay.BgServices
                         if (!orders.Any())
                         {
                             break;
+                        }
+                        if (!UseDynamicAddress)
+                        {
+                            await matcher.ObserveAsync(new("TRON", "USDT_TRC20", ContractAddress, item.TransactionId, 0,
+                                item.From, item.To, item.Amount, 0, item.BlockTimestamp.ToDateTime(), OnlyConfirmed ? 1 : 0), stoppingToken);
+                            continue;
                         }
                         //此交易已被其他订单使用
                         if (await _repository.Select.AnyAsync(x => x.BlockTransactionId == item.TransactionId))

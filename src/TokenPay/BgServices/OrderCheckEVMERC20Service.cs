@@ -7,6 +7,7 @@ using TokenPay.Domains;
 using TokenPay.Extensions;
 using TokenPay.Helper;
 using TokenPay.Models.EthModel;
+using TokenPay.Services;
 
 namespace TokenPay.BgServices
 {
@@ -17,6 +18,7 @@ namespace TokenPay.BgServices
         private readonly List<EVMChain> _chains;
         private readonly Channel<TokenOrders> _channel;
         private readonly IFreeSql freeSql;
+        private readonly IStaticPaymentMatcher matcher;
         private bool UseDynamicAddress => _configuration.GetValue("UseDynamicAddress", true);
         private bool UseDynamicAddressAmountMove => _configuration.GetValue("DynamicAddressConfig:AmountMove", false);
         public OrderCheckEVMERC20Service(ILogger<OrderCheckEVMERC20Service> logger,
@@ -24,13 +26,14 @@ namespace TokenPay.BgServices
             IHostEnvironment env,
             List<EVMChain> Chains,
             Channel<TokenOrders> channel,
-            IFreeSql freeSql) : base("EVM代币订单检测", TimeSpan.FromSeconds(15), logger)
+            IFreeSql freeSql, IStaticPaymentMatcher matcher) : base("EVM代币订单检测", TimeSpan.FromSeconds(15), logger)
         {
             this._configuration = configuration;
             this._env = env;
             _chains = Chains;
             this._channel = channel;
             this.freeSql = freeSql;
+            this.matcher = matcher;
         }
 
         protected override async Task ExecuteAsync(DateTime RunTime, CancellationToken stoppingToken)
@@ -111,6 +114,15 @@ namespace TokenPay.BgServices
                         if (!orders.Any())
                         {
                             break;
+                        }
+                        if (!string.Equals(item.ContractAddress, erc20.ContractAddress, StringComparison.OrdinalIgnoreCase)
+                            || item.Confirmations < chain.Confirmations) continue;
+                        if (!UseDynamicAddress)
+                        {
+                            await matcher.ObserveAsync(new(chain.ChainNameEN, Currency, erc20.ContractAddress, item.Hash,
+                                item.LogIndex, item.From, address, item.RealAmount,
+                                long.TryParse(item.BlockNumber, out var bn) ? bn : 0, item.DateTime, (int)item.Confirmations));
+                            continue;
                         }
                         //此交易已被其他订单使用
                         if (await _repository.Select.AnyAsync(x => x.BlockTransactionId == item.Hash))
