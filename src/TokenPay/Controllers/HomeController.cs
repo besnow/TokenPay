@@ -29,12 +29,14 @@ namespace TokenPay.Controllers
         private FiatCurrency BaseCurrency => Enum.Parse<FiatCurrency>(_configuration.GetValue("BaseCurrency", "CNY")!);
         public static int GetDecimals(string currency, IConfiguration _configuration)
         {
-            var decimals = currency switch
-            {
-                "TRX" => _configuration.GetValue("Decimals:TRX", 2),
-                "EVM_ETH" => _configuration.GetValue("Decimals:ETH", 5),
-                _ => _configuration.GetValue($"Decimals:{currency}", 4)
-            };
+            var decimals = currency == "TRX"
+                ? _configuration.GetValue("Decimals:TRX", 2)
+                : currency.Contains("USDT", StringComparison.OrdinalIgnoreCase)
+                    ? _configuration.GetValue("Decimals:USDT", 6)
+                    : currency.StartsWith("EVM_", StringComparison.OrdinalIgnoreCase) &&
+                      currency.EndsWith("_ETH", StringComparison.OrdinalIgnoreCase)
+                        ? _configuration.GetValue("Decimals:ETH", 8)
+                        : _configuration.GetValue($"Decimals:{currency}", 8);
 
             return decimals;
         }
@@ -258,6 +260,7 @@ namespace TokenPay.Controllers
                 NotifyUrl = model.NotifyUrl,
                 RedirectUrl = model.RedirectUrl,
                 PassThroughInfo = model.PassThroughInfo,
+                IsStaticAddress = !_configuration.GetValue("UseDynamicAddress", true),
             };
             var UseDynamicAddress = _configuration.GetValue("UseDynamicAddress", true);
             try
@@ -289,6 +292,10 @@ namespace TokenPay.Controllers
                     Message = "此订单金额过低！"
                 });
             }
+            order.ExpectedAmount = order.Amount;
+            // Existing installations did exact matching. Until a trustworthy locked
+            // USDT conversion is available, never manufacture a zero minimum.
+            order.MinimumPaidAmount = order.Amount;
             await _repository.InsertAsync(order);
             return Json(new ReturnData<string>
             {

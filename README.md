@@ -1,4 +1,10 @@
-﻿# TokenPay
+# TokenPay
+
+## 静态地址支付窗口
+
+静态地址模式的 `AutoPaymentExpireTime` 默认为创建后 60 分钟，该时间内的唯一合格候选无需点击“我已支付”即可自动匹配。`LatePaymentRetentionTime` 默认为 24 小时，只用于保留异常到账、用户已报告的延迟付款和 TxID/人工处理，不会让所有旧订单持续参与普通匹配。
+
+少付上限为 `min(2 USDT, 订单 USDT 价值 × 10%)`，并使用创建订单时锁定的汇率与最低到账数。多付可完成订单，但多付部分不退回、不计入余额。
 <p>
 <a href="https://www.gnu.org/licenses/gpl-3.0.html"><img src="https://img.shields.io/badge/license-GPLV3-blue" alt="license GPLV3"></a>
 <a href="https://dotnet.microsoft.com/zh-cn/download/dotnet/8.0"><img src="https://img.shields.io/badge/.NET-8-orange" alt=".net8"></a>

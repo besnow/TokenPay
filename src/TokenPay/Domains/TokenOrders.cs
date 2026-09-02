@@ -51,10 +51,26 @@ namespace TokenPay.Domains
         /// </summary>
         public required string Currency { get; set; }
         /// <summary>
-        /// 订单金额，保留4位小数
+        /// 订单创建时锁定的应付币数。
         /// </summary>
-        [Column(Precision = 15, Scale = 4)]
+        [Column(Precision = 38, Scale = 18)]
         public decimal Amount { get; set; }
+        [Column(Precision = 38, Scale = 18)]
+        public decimal ExpectedAmount { get; set; }
+        [Column(Precision = 38, Scale = 18)]
+        public decimal OrderValueUsdt { get; set; }
+        [Column(Precision = 38, Scale = 18)]
+        public decimal LockedCoinPrice { get; set; }
+        [Column(Precision = 38, Scale = 18)]
+        public decimal AllowedUnderpayAmount { get; set; }
+        [Column(Precision = 38, Scale = 18)]
+        public decimal MinimumPaidAmount { get; set; }
+        public bool IsStaticAddress { get; set; }
+        public PaymentMatchStatus PaymentMatchStatus { get; set; } = PaymentMatchStatus.Waiting;
+        public string? PaymentMatchReason { get; set; }
+        public DateTime? PaymentReportedAtUtc { get; set; }
+        public string? MatchMethod { get; set; }
+        public Guid? ChainPaymentId { get; set; }
         /// <summary>
         /// 钱包地址
         /// </summary>
@@ -95,5 +111,10 @@ namespace TokenPay.Domains
         Pending,
         Paid,
         Expired
+    }
+    public enum PaymentMatchStatus
+    {
+        Waiting, Unmatched, Matched, Ambiguous, AmountInsufficient,
+        TxIdSubmitted, ManualReview, Expired
     }
 }

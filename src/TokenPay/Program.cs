@@ -18,6 +18,7 @@ using TokenPay.Controllers;
 using TokenPay.Domains;
 using TokenPay.Helper;
 using TokenPay.Models.EthModel;
+using TokenPay.StaticPayments;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Override("Microsoft", LogEventLevel.Information)
@@ -106,6 +107,7 @@ IFreeSql fsql = new FreeSqlBuilder()
         .Build();
 
 Services.AddSingleton(fsql);
+Services.Configure<StaticPaymentOptions>(Configuration.GetSection("StaticPaymentMatch"));
 Services.AddScoped<UnitOfWorkManager>();
 Services.AddFreeRepository();
 Services.AddHostedService<OrderExpiredService>();
@@ -166,6 +168,21 @@ if (!string.IsNullOrEmpty(WebProxy))
 
 
 var app = builder.Build();
+
+// AutoSyncStructure has created the added columns at this point. This
+// idempotent compatibility pass deliberately touches pending orders only.
+if (!UseDynamicAddress)
+{
+    var legacyPending = await fsql.Select<TokenOrders>()
+        .Where(x => x.Status == OrderStatus.Pending && !x.IsStaticAddress)
+        .ToListAsync();
+    var migrated = LegacyStaticOrderMigration.UpgradePendingOrders(legacyPending, false);
+    if (migrated > 0)
+        await fsql.Update<TokenOrders>().SetSource(legacyPending).ExecuteAffrowsAsync();
+    Log.Information("Static pending-order compatibility migration updated {Count} orders", migrated);
+}
+if (!UseDynamicAddress && !Configuration.GetValue("StaticPaymentMatch:Enabled", true))
+    Log.Warning("StaticPaymentMatch is disabled; scanners retain legacy exact-amount matching");
 
 if (!app.Environment.IsDevelopment())
 {
