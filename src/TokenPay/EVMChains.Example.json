@@ -7,6 +7,7 @@
       "BaseCoin": "ETH",
       "Decimals": 18,
       "ScanHost": "https://etherscan.io",
+      "RpcHost": "https://ethereum-rpc.publicnode.com",
       "ChainId": 1, //各个ETH系的ChainId可在此页面检索 https://docs.etherscan.io/etherscan-v2/supported-chains
       "ApiKey": "必填项", // 使用ETH V2 Api，申请教程 https://docs.etherscan.io/etherscan-v2/getting-an-api-key
       "ERC20Name": "ERC20",
@@ -30,6 +31,7 @@
       "BaseCoin": "BNB",
       "Decimals": 18,
       "ScanHost": "https://www.bscscan.com",
+      "RpcHost": "https://bsc-rpc.publicnode.com",
       "ChainId": 56, //各个ETH系的ChainId可在此页面检索 https://docs.etherscan.io/etherscan-v2/supported-chains
       "ApiKey": "必填项", // 使用ETH V2 Api，申请教程 https://docs.etherscan.io/etherscan-v2/getting-an-api-key
       "ERC20Name": "BEP20",
@@ -53,6 +55,7 @@
       "BaseCoin": "POL",
       "Decimals": 18,
       "ScanHost": "https://polygonscan.com",
+      "RpcHost": "https://polygon-bor-rpc.publicnode.com",
       "ChainId": 137, //各个ETH系的ChainId可在此页面检索 https://docs.etherscan.io/etherscan-v2/supported-chains
       "ApiKey": "必填项", // 使用ETH V2 Api，申请教程 https://docs.etherscan.io/etherscan-v2/getting-an-api-key
       "ERC20Name": "ERC20",

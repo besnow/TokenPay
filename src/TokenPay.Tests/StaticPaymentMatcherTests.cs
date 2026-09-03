@@ -42,7 +42,7 @@ public class StaticPaymentMatcherTests : IDisposable
         var observed = await _matcher.ObserveAsync(Transfer(DateTime.UtcNow, "aaaaaaaaaaaaaaaa", 10m));
         Assert.Equal(PaymentMatchStatus.Ambiguous, observed.Status);
         Assert.Empty(await _db.Select<TokenOrders>().Where(x => x.Status == OrderStatus.Paid).ToListAsync());
-        var claimed = await _matcher.ClaimByTxIdAsync(first.Id, "aaaaaaaaaaaaaaaa", "event:7");
+        var claimed = await _matcher.ClaimByTxIdAsync(first.Id, Hash("aaaaaaaaaaaaaaaa"), "event:7");
         Assert.Equal(PaymentMatchStatus.Matched, claimed.Status);
         Assert.Single(await _db.Select<TokenOrders>().Where(x => x.Status == OrderStatus.Paid).ToListAsync());
     }
@@ -72,10 +72,10 @@ public class StaticPaymentMatcherTests : IDisposable
         var resolver = new FakeResolver(Transfer(DateTime.UtcNow, "dddddddddddddddd", 10m));
         var matcher = new StaticPaymentMatcher(_db, Options.Create(new StaticPaymentMatchOptions()), _channel,
             NullLogger<StaticPaymentMatcher>.Instance, new[] { resolver });
-        var result = await matcher.ClaimByTxIdAsync(order.Id, "dddddddddddddddd", "event:7");
+        var result = await matcher.ClaimByTxIdAsync(order.Id, Hash("dddddddddddddddd"), "event:7");
         Assert.True(resolver.Called);
         Assert.Equal(PaymentMatchStatus.Matched, result.Status);
-        Assert.Single(await _db.Select<ChainPayment>().Where(x => x.TransactionHash == "dddddddddddddddd").ToListAsync());
+        Assert.Single(await _db.Select<ChainPayment>().Where(x => x.TransactionHash == Hash("dddddddddddddddd")).ToListAsync());
     }
 
     [Fact]
@@ -98,7 +98,7 @@ public class StaticPaymentMatcherTests : IDisposable
         Assert.Equal(PaymentMatchStatus.Matched, paid.Status);
         Assert.Equal(PaymentMatchStatus.Matched, repeated.Status);
         Assert.Equal(12m, (await _db.Select<TokenOrders>().Where(x => x.Id == paid.OrderId).FirstAsync()).PayAmount);
-        Assert.Single(await _db.Select<ChainPayment>().Where(x => x.TransactionHash == "over").ToListAsync());
+        Assert.Single(await _db.Select<ChainPayment>().Where(x => x.TransactionHash == Hash("over")).ToListAsync());
     }
 
     [Fact]
@@ -113,9 +113,28 @@ public class StaticPaymentMatcherTests : IDisposable
         var first = await AddOrder(DateTime.UtcNow.AddMinutes(-1));
         await AddOrder(DateTime.UtcNow.AddMinutes(-1));
         await _matcher.ObserveAsync(Transfer(DateTime.UtcNow, "ffffffffffffffff", 12m));
-        var result = await _matcher.ClaimByTxIdAsync(first.Id, "ffffffffffffffff", "event:7");
+        var result = await _matcher.ClaimByTxIdAsync(first.Id, Hash("ffffffffffffffff"), "event:7");
         Assert.Equal(PaymentMatchStatus.ClaimRejected, result.Status);
         Assert.Equal(OrderStatus.Pending, (await _db.Select<TokenOrders>().Where(x => x.Id == first.Id).FirstAsync()).Status);
+    }
+
+    [Fact]
+    public async Task Hash_case_variant_cannot_pay_a_second_order_and_repeat_is_idempotent()
+    {
+        var first = await AddOrder(DateTime.UtcNow.AddMinutes(-2));
+        var lower = new string('a', 64);
+        Assert.Equal(PaymentMatchStatus.Matched, (await _matcher.ObserveAsync(
+            new("TRON", "USDT_TRC20", "contract", lower, "event:7", "from", "TStatic", 10m, 1, DateTime.UtcNow, 20))).Status);
+        Assert.Equal(PaymentMatchStatus.Matched,
+            (await _matcher.ClaimByTxIdAsync(first.Id, lower.ToUpperInvariant(), "event:7")).Status);
+
+        var second = await AddOrder(DateTime.UtcNow.AddMinutes(-1));
+        var rejected = await _matcher.ClaimByTxIdAsync(second.Id, lower.ToLowerInvariant(), "event:7");
+        Assert.Equal(PaymentMatchStatus.AlreadyUsed, rejected.Status);
+        Assert.Single(await _db.Select<ChainPayment>().Where(x => x.TransactionHash == lower.ToUpperInvariant()).ToListAsync());
+        Assert.Single(await _db.Select<TokenOrders>().Where(x => x.Status == OrderStatus.Paid).ToListAsync());
+        Assert.True(_channel.Reader.TryRead(out _));
+        Assert.False(_channel.Reader.TryRead(out _));
     }
 
     [Fact]
@@ -124,7 +143,7 @@ public class StaticPaymentMatcherTests : IDisposable
         await AddOrder(DateTime.UtcNow.AddMinutes(-1));
         await _matcher.ObserveAsync(Transfer(DateTime.UtcNow, "multi", 8m) with { TransferKey = "event:1" });
         await _matcher.ObserveAsync(Transfer(DateTime.UtcNow, "multi", 10m) with { TransferKey = "event:2" });
-        Assert.Equal(2, (await _db.Select<ChainPayment>().Where(x => x.TransactionHash == "multi").ToListAsync()).Count);
+        Assert.Equal(2, (await _db.Select<ChainPayment>().Where(x => x.TransactionHash == Hash("multi")).ToListAsync()).Count);
     }
 
     private async Task<TokenOrders> AddOrder(DateTime created)
@@ -132,7 +151,8 @@ public class StaticPaymentMatcherTests : IDisposable
         var order = new TokenOrders { OutOrderId = Guid.NewGuid().ToString(), OrderUserKey = "u", Currency = "USDT_TRC20", ToAddress = "TStatic", Status = OrderStatus.Pending, IsStaticAddress = true, Amount = 10m, ActualAmount = 10m, LockedCoinPrice = 1m, OrderValueUsdt = 10m, AllowedUnderpayAmount = 1m, MinimumPaidAmount = 9m, CreateTime = created };
         await _db.Insert(order).ExecuteAffrowsAsync(); return order;
     }
-    private static ObservedTransfer Transfer(DateTime time, string hash, decimal amount) => new("TRON", "USDT_TRC20", "contract", hash, "event:7", "from", "TStatic", amount, 1, time, 20);
+    private static string Hash(string seed) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(seed)));
+    private static ObservedTransfer Transfer(DateTime time, string hash, decimal amount) => new("TRON", "USDT_TRC20", "contract", Hash(hash), "event:7", "from", "TStatic", amount, 1, time, 20);
     public void Dispose() { _db.Dispose(); if (File.Exists(_file)) File.Delete(_file); }
 
     private sealed class FakeResolver(ObservedTransfer transfer) : IChainTransactionResolver

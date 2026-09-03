@@ -155,25 +155,19 @@ namespace TokenPay.BgServices
                             { "module", "account" },
                             { "action", "txlist" },
                             { "address", address },
-                            { "page", 1 },
                             { "offset", 100 },
-                            { "sort", "desc" }
+                            { "sort", "asc" }
                         };
                         if (cursorExternal.LastBlockNumber > 0) query.Add("startblock", Math.Max(0, cursorExternal.LastBlockNumber - 12));
                         query.Add("endblock", Math.Max(0, NowBlockNumber - chain.Confirmations));
                         if (_env.IsProduction())
                             query.Add("apikey", chain.ApiKey);
 
-                        var req = BaseUrl
-                            .AppendPathSegment($"api")
-                            .SetQueryParams(query)
-                            .WithTimeout(15);
-                        var result = await req
-                            .GetJsonAsync<BaseResponseList<EthTransaction>>();
+                        var external = await FetchPages(BaseUrl, query, stoppingToken);
 
-                        if (result.Status == "1" && result.Result?.Count > 0)
+                        if (external.Count > 0)
                         {
-                            foreach (var item in result.Result)
+                            foreach (var item in external)
                             {
                                 //没有需要匹配的订单了
                                 if (!orders.Any())
@@ -205,24 +199,18 @@ namespace TokenPay.BgServices
                             { "module", "account" },
                             { "action", "txlistinternal" },
                             { "address", address },
-                            { "page", 1 },
                             { "offset", 100 },
-                            { "sort", "desc" }
+                            { "sort", "asc" }
                         };
                         if (cursorInternal.LastBlockNumber > 0) queryInternal.Add("startblock", Math.Max(0, cursorInternal.LastBlockNumber - 12));
                         queryInternal.Add("endblock", Math.Max(0, NowBlockNumber - chain.Confirmations));
                         if (_env.IsProduction())
                             queryInternal.Add("apikey", chain.ApiKey);
 
-                        var reqInternal = BaseUrl
-                            .AppendPathSegment($"api")
-                            .SetQueryParams(queryInternal)
-                            .WithTimeout(15);
-                        var resultInternal = await reqInternal
-                            .GetJsonAsync<BaseResponseList<EthTransaction>>();
-                        if (resultInternal.Status == "1" && resultInternal.Result?.Count > 0)
+                        var internalTransactions = await FetchPages(BaseUrl, queryInternal, stoppingToken);
+                        if (internalTransactions.Count > 0)
                         {
-                            foreach (var item in resultInternal.Result)
+                            foreach (var item in internalTransactions)
                             {
                                 //没有需要匹配的订单了
                                 if (!orders.Any())
@@ -240,8 +228,12 @@ namespace TokenPay.BgServices
                                     continue;
                                 }
                                 if (!string.Equals(item.To, address, StringComparison.OrdinalIgnoreCase)) continue;
-                                var traceKey = !string.IsNullOrWhiteSpace(item.TraceId) ? item.TraceId : item.TransactionIndex;
-                                await CheckOrder(item, $"trace:{traceKey}");
+                                if (string.IsNullOrWhiteSpace(item.TraceId))
+                                {
+                                    _logger.LogError("EVM internal transaction {Hash} has no traceId; event skipped", item.Hash);
+                                    continue;
+                                }
+                                await CheckOrder(item, $"trace:{item.TraceId}");
                             }
                         }
                         #endregion
@@ -254,6 +246,22 @@ namespace TokenPay.BgServices
                     _logger.LogError(e, "{coin}查询交易记录出错！", Currency);
                 }
             }
+        }
+        private async Task<List<EthTransaction>> FetchPages(string baseUrl, Dictionary<string, object> query, CancellationToken ct)
+        {
+            const int offset = 100;
+            var all = new List<EthTransaction>();
+            for (var page = 1; page <= 1000; page++)
+            {
+                query["page"] = page;
+                var result = await baseUrl.AppendPathSegment("api").SetQueryParams(query).WithTimeout(15)
+                    .GetJsonAsync<BaseResponseList<EthTransaction>>(cancellationToken: ct);
+                var empty = result.Status == "0" && result.Message?.Contains("No transactions", StringComparison.OrdinalIgnoreCase) == true;
+                if (result.Status != "1" && !empty) throw new ChainQueryException($"EVM scan API returned {result.Message ?? "NOTOK"}");
+                all.AddRange(result.Result);
+                if (result.Result.Count < offset) return all;
+            }
+            throw new ChainQueryException("EVM scan exceeded 1000 pages; cursor was not advanced.");
         }
         private async Task SendAdminMessage(TokenOrders order)
         {

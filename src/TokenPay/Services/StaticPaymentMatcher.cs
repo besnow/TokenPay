@@ -12,7 +12,9 @@ public sealed record ObservedTransfer(
     string TransferKey, string? FromAddress, string ToAddress, decimal Amount,
     long BlockNumber, DateTime BlockTimeUtc, int Confirmations);
 
-public sealed record MatchResult(PaymentMatchStatus Status, Guid? OrderId = null, string? Reason = null);
+public sealed record ClaimCandidate(string TransferKey, decimal Amount, string? FromAddress, string ToAddress);
+public sealed record MatchResult(PaymentMatchStatus Status, Guid? OrderId = null, string? Reason = null,
+    IReadOnlyList<ClaimCandidate>? Candidates = null);
 
 public interface IStaticPaymentMatcher
 {
@@ -55,10 +57,11 @@ public sealed class StaticPaymentMatcher : IStaticPaymentMatcher
 
     private async Task<ChainPayment> SaveObservedAsync(ObservedTransfer transfer, CancellationToken cancellationToken)
     {
+        var canonicalHash = ChainTransactionHash.Normalize(transfer.Network, transfer.TransactionHash);
         var payment = new ChainPayment
         {
             Network = transfer.Network, Asset = transfer.Asset, TokenContract = transfer.TokenContract,
-            TransactionHash = transfer.TransactionHash, TransferKey = transfer.TransferKey,
+            TransactionHash = canonicalHash, TransferKey = transfer.TransferKey,
             FromAddress = transfer.FromAddress, ToAddress = transfer.ToAddress, ActualAmount = transfer.Amount,
             BlockNumber = transfer.BlockNumber, BlockTime = EnsureUtc(transfer.BlockTimeUtc),
             Confirmations = transfer.Confirmations, MatchStatus = PaymentMatchStatus.Unmatched
@@ -66,31 +69,45 @@ public sealed class StaticPaymentMatcher : IStaticPaymentMatcher
         try { await _db.Insert(payment).ExecuteAffrowsAsync(cancellationToken); }
         catch (Exception ex) when (IsUniqueConstraintViolation(ex))
         {
-            payment = await _db.Select<ChainPayment>().Where(x => x.Network == transfer.Network && x.TransactionHash == transfer.TransactionHash && x.TransferKey == transfer.TransferKey).FirstAsync(cancellationToken);
+            payment = await _db.Select<ChainPayment>().Where(x => x.Network == transfer.Network && x.TransactionHash == canonicalHash && x.TransferKey == transfer.TransferKey).FirstAsync(cancellationToken);
         }
         return payment;
     }
 
     public async Task<MatchResult> ClaimByTxIdAsync(Guid orderId, string transactionHash, string? transferKey = null, string? clientIp = null, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(transactionHash) || transactionHash.Length is < 16 or > 128 || !transactionHash.All(c => char.IsAsciiLetterOrDigit(c) || c is 'x' or 'X'))
-            return new(PaymentMatchStatus.Unmatched, Reason: "invalid transaction hash");
         var order = await _db.Select<TokenOrders>().Where(x => x.Id == orderId && x.IsStaticAddress).FirstAsync(cancellationToken);
-        if (order == null || order.Status != OrderStatus.Pending) return new(PaymentMatchStatus.ClaimRejected, Reason: "order is not pending");
+        if (order == null) return new(PaymentMatchStatus.ClaimRejected, Reason: "order not found");
         var expectedNetwork = order.Currency.StartsWith("EVM_", StringComparison.Ordinal)
             ? order.Currency.Split('_')[1] : "TRON";
-        var transfers = await _db.Select<ChainPayment>().Where(x => x.Network == expectedNetwork && x.TransactionHash == transactionHash && x.Asset == order.Currency)
+        string canonicalHash;
+        try { canonicalHash = ChainTransactionHash.Normalize(expectedNetwork, transactionHash); }
+        catch (FormatException ex) { return new(PaymentMatchStatus.ClaimRejected, Reason: ex.Message); }
+        if (order.Status != OrderStatus.Pending)
+        {
+            if (order.Status == OrderStatus.Paid && order.ChainPaymentId.HasValue)
+            {
+                var bound = await _db.Select<ChainPayment>().Where(x => x.Id == order.ChainPaymentId.Value).FirstAsync(cancellationToken);
+                if (bound != null && bound.TransactionHash == canonicalHash &&
+                    (string.IsNullOrWhiteSpace(transferKey) || bound.TransferKey == transferKey))
+                    return new(PaymentMatchStatus.Matched, order.Id);
+            }
+            return new(PaymentMatchStatus.ClaimRejected, Reason: "order is already bound to another event");
+        }
+        var transfers = await _db.Select<ChainPayment>().Where(x => x.Network == expectedNetwork && x.TransactionHash == canonicalHash && x.Asset == order.Currency)
             .WhereIf(!string.IsNullOrWhiteSpace(transferKey), x => x.TransferKey == transferKey).ToListAsync(cancellationToken);
         if (transfers.Count == 0)
         {
             var resolver = _resolvers.SingleOrDefault(x => x.CanResolve(order));
             if (resolver == null) return new(PaymentMatchStatus.Unmatched, Reason: "no chain resolver configured for asset");
-            var resolved = await resolver.ResolveAsync(order, transactionHash, cancellationToken);
+            IReadOnlyList<ObservedTransfer> resolved;
+            try { resolved = await resolver.ResolveAsync(order, canonicalHash, cancellationToken); }
+            catch (ChainQueryException ex) { return new(PaymentMatchStatus.Confirming, Reason: ex.Message); }
             foreach (var observed in resolved.Where(x =>
                          x.Network == expectedNetwork && x.Asset == order.Currency
                          && string.Equals(x.ToAddress, order.ToAddress, StringComparison.OrdinalIgnoreCase)))
                 await SaveObservedAsync(observed, cancellationToken);
-            transfers = await _db.Select<ChainPayment>().Where(x => x.Network == expectedNetwork && x.TransactionHash == transactionHash && x.Asset == order.Currency)
+            transfers = await _db.Select<ChainPayment>().Where(x => x.Network == expectedNetwork && x.TransactionHash == canonicalHash && x.Asset == order.Currency)
                 .WhereIf(!string.IsNullOrWhiteSpace(transferKey), x => x.TransferKey == transferKey).ToListAsync(cancellationToken);
         }
         if (transfers.Count == 0) return new(PaymentMatchStatus.Unmatched, Reason: "链上查询未发现符合网络、币种和收款地址的成功到账");
@@ -104,12 +121,13 @@ public sealed class StaticPaymentMatcher : IStaticPaymentMatcher
             && EnsureUtc(x.BlockTime) >= created.AddSeconds(-_options.BlockTimeSkewSeconds)
             && EnsureUtc(x.BlockTime) <= created.AddHours(_options.LatePaymentRetentionHours)).ToList();
         if (transfers.Count == 0) return new(PaymentMatchStatus.ClaimRejected, Reason: "到账金额与当前订单不匹配");
-        if (transfers.Count > 1) return new(PaymentMatchStatus.Ambiguous, Reason: "该TxID包含多笔符合条件的转账，请选择安全的转账事件");
+        if (transfers.Count > 1) return new(PaymentMatchStatus.Ambiguous, Reason: "该TxID包含多笔符合条件的转账，请选择安全的转账事件",
+            Candidates: transfers.Select(x => new ClaimCandidate(x.TransferKey, x.ActualAmount, x.FromAddress, x.ToAddress)).ToArray());
         var payment = transfers[0];
         try
         {
             await _db.Insert(new PaymentClaim { OrderId = orderId, ChainPaymentId = payment.Id, Network = expectedNetwork,
-                Asset = order.Currency, TransactionHash = transactionHash, TransferKey = payment.TransferKey,
+                Asset = order.Currency, TransactionHash = canonicalHash, TransferKey = payment.TransferKey,
                 ClientIp = clientIp, ClaimStatus = PaymentClaimStatus.Submitted })
                 .ExecuteAffrowsAsync(cancellationToken);
         }
@@ -119,7 +137,7 @@ public sealed class StaticPaymentMatcher : IStaticPaymentMatcher
             .Set(x => x.ClaimStatus, result.Status == PaymentMatchStatus.Matched ? PaymentClaimStatus.Matched :
                 result.Status == PaymentMatchStatus.AlreadyUsed ? PaymentClaimStatus.AlreadyUsed : PaymentClaimStatus.Rejected)
             .Set(x => x.RejectReason, result.Reason).Set(x => x.CompletedAtUtc, DateTime.UtcNow)
-            .Where(x => x.OrderId == orderId && x.Network == expectedNetwork && x.TransactionHash == transactionHash && x.TransferKey == payment.TransferKey)
+            .Where(x => x.OrderId == orderId && x.Network == expectedNetwork && x.TransactionHash == canonicalHash && x.TransferKey == payment.TransferKey)
             .ExecuteAffrowsAsync(cancellationToken);
         return result;
     }
@@ -156,6 +174,11 @@ public sealed class StaticPaymentMatcher : IStaticPaymentMatcher
             return new(PaymentMatchStatus.AlreadyUsed, Reason: "该交易已被其他订单使用");
         }
         if (completed == null) return new(PaymentMatchStatus.ClaimRejected, Reason: "数据库事务认领失败");
+        await _db.Update<TokenOrders>().Set(x => x.PaymentMatchStatus, PaymentMatchStatus.Waiting)
+            .Set(x => x.PaymentMatchReason, (string?)null)
+            .Where(x => x.Id != completed.Id && x.Status == OrderStatus.Pending && x.IsStaticAddress
+                && x.Currency == completed.Currency && x.ToAddress == completed.ToAddress
+                && x.PaymentMatchStatus == PaymentMatchStatus.Ambiguous).ExecuteAffrowsAsync(ct);
         await _paidOrders.Writer.WriteAsync(completed, ct);
         return new(PaymentMatchStatus.Matched, order.Id);
     }
@@ -237,14 +260,14 @@ public sealed class StaticPaymentMatcher : IStaticPaymentMatcher
         {
             var candidateIds = candidates.Select(o => o.Id).ToArray();
             await _db.Update<TokenOrders>().Set(x => x.PaymentMatchStatus, PaymentMatchStatus.Ambiguous)
-                .Set(x => x.PaymentMatchReason, "multiple eligible orders; never assigned by public TxID")
+                .Set(x => x.PaymentMatchReason, "自动扫描发现多个候选，等待用户提交TxID认领当前订单")
                 .Where(x => candidateIds.Contains(x.Id)).ExecuteAffrowsAsync(ct);
             if (claimedOrderId.HasValue)
                 await _db.Update<TokenOrders>().Set(x => x.PaymentMatchStatus, PaymentMatchStatus.Ambiguous)
-                    .Set(x => x.PaymentMatchReason, "public TxID has multiple eligible orders")
+                    .Set(x => x.PaymentMatchReason, "自动扫描发现多个候选，等待用户提交TxID认领当前订单")
                     .Where(x => x.Id == claimedOrderId.Value).ExecuteAffrowsAsync(ct);
             return await MarkAsync(payment.Id, PaymentMatchStatus.Ambiguous,
-                "multiple eligible orders; never assigned by public TxID", ct);
+                "自动扫描发现多个候选，等待用户提交TxID认领当前订单", ct);
         }
 
         var order = candidates.Single();

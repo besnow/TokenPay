@@ -20,6 +20,7 @@ namespace TokenPay.BgServices
         private readonly IFreeSql freeSql;
         private readonly IStaticPaymentMatcher matcher;
         private readonly ChainScanCursorStore cursors;
+        private readonly EvmChainTransactionResolver resolver;
         private bool UseDynamicAddress => _configuration.GetValue("UseDynamicAddress", true);
         private bool UseDynamicAddressAmountMove => _configuration.GetValue("DynamicAddressConfig:AmountMove", false);
         public OrderCheckEVMERC20Service(ILogger<OrderCheckEVMERC20Service> logger,
@@ -27,7 +28,8 @@ namespace TokenPay.BgServices
             IHostEnvironment env,
             List<EVMChain> Chains,
             Channel<TokenOrders> channel,
-            IFreeSql freeSql, IStaticPaymentMatcher matcher, ChainScanCursorStore cursors) : base("EVM代币订单检测", TimeSpan.FromSeconds(15), logger)
+            IFreeSql freeSql, IStaticPaymentMatcher matcher, ChainScanCursorStore cursors,
+            EvmChainTransactionResolver resolver) : base("EVM代币订单检测", TimeSpan.FromSeconds(15), logger)
         {
             this._configuration = configuration;
             this._env = env;
@@ -36,6 +38,7 @@ namespace TokenPay.BgServices
             this.freeSql = freeSql;
             this.matcher = matcher;
             this.cursors = cursors;
+            this.resolver = resolver;
         }
 
         protected override async Task ExecuteAsync(DateTime RunTime, CancellationToken stoppingToken)
@@ -89,6 +92,11 @@ namespace TokenPay.BgServices
                 {
                     continue;
                 }
+                if (!UseDynamicAddress)
+                {
+                    await ScanStaticAsync(BaseUrl, address, Currency, chain, erc20, cursor);
+                    continue;
+                }
                 var query = new Dictionary<string, object>
                 {
                     { "chainid", chain.ChainId },
@@ -122,7 +130,6 @@ namespace TokenPay.BgServices
                         }
                         if (!string.Equals(item.ContractAddress, erc20.ContractAddress, StringComparison.OrdinalIgnoreCase)
                             || !string.Equals(item.To, address, StringComparison.OrdinalIgnoreCase)
-                            || item.IsError != 0 || item.TxreceiptStatus == 0
                             || item.Confirmations < chain.Confirmations || item.TokenDecimal != erc20.Decimals) continue;
                         if (!UseDynamicAddress)
                         {
@@ -181,6 +188,44 @@ namespace TokenPay.BgServices
                     if (newest > 0) await cursors.AdvanceAsync(cursor, newest, result.Result.Max(x => x.DateTime), null, CancellationToken.None);
                 }
             }
+        }
+
+        private async Task ScanStaticAsync(string baseUrl, string address, string currency, EVMChain chain,
+            EVMErc20 token, ChainScanCursor cursor)
+        {
+            const int offset = 100;
+            const int maxPages = 1000;
+            long lastCompleteBlock = cursor.LastBlockNumber;
+            var receiptCache = new Dictionary<string, IReadOnlyList<ObservedTransfer>>(StringComparer.Ordinal);
+            var discoveredItems = await ScanPagination.ReadEvmAsync<ERC20Transaction>(async (page, ct) =>
+            {
+                var query = new Dictionary<string, object>
+                {
+                    ["chainid"] = chain.ChainId, ["module"] = "account", ["action"] = "tokentx",
+                    ["contractaddress"] = token.ContractAddress, ["address"] = address,
+                    ["page"] = page, ["offset"] = offset, ["sort"] = "asc",
+                    ["startblock"] = Math.Max(0, cursor.LastBlockNumber - 12)
+                };
+                if (_env.IsProduction()) query["apikey"] = chain.ApiKey;
+                var result = await baseUrl.AppendPathSegment("api").SetQueryParams(query).WithTimeout(15)
+                    .GetJsonAsync<BaseResponseList<ERC20Transaction>>();
+                var noTransactions = result.Status == "0" && result.Message?.Contains("No transactions", StringComparison.OrdinalIgnoreCase) == true;
+                return (result.Status == "1" || noTransactions, (IReadOnlyList<ERC20Transaction>)result.Result,
+                    $"{chain.ChainNameEN} token discovery API returned {result.Message ?? "NOTOK"}.");
+            }, CancellationToken.None, offset, maxPages);
+            foreach (var discovered in discoveredItems)
+            {
+                var hash = ChainTransactionHash.Normalize(chain.ChainNameEN, discovered.Hash);
+                if (!receiptCache.TryGetValue(hash, out var transfers))
+                {
+                    transfers = await resolver.ResolveTransfersAsync(chain, currency, token, address, hash, CancellationToken.None);
+                    receiptCache.Add(hash, transfers);
+                }
+                foreach (var transfer in transfers) await matcher.ObserveAsync(transfer);
+                if (long.TryParse(discovered.BlockNumber, out var block)) lastCompleteBlock = Math.Max(lastCompleteBlock, block);
+            }
+            if (lastCompleteBlock > cursor.LastBlockNumber)
+                await cursors.AdvanceAsync(cursor, lastCompleteBlock, DateTime.UtcNow, null, CancellationToken.None);
         }
         private async Task SendAdminMessage(TokenOrders order)
         {

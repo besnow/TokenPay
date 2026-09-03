@@ -66,6 +66,7 @@ else
                 <button id="paid-button" class="btn btn-primary w-100" type="button">我已支付</button>
                 <div id="txid-box" class="input-group mt-2 d-none">
                     <input id="txid" class="form-control" placeholder="请输入交易哈希（TxID）" />
+                    <select id="transfer-key" class="form-select d-none" aria-label="选择转账事件"></select>
                     <button id="txid-submit" class="btn btn-outline-primary" type="button">提交</button>
                 </div>
             }
@@ -129,7 +130,15 @@ else
         $("#txid-submit").on("click", function () {
             $.ajax({ url: "/payment/@Model.Id/txid", method: "POST", contentType: "application/json",
                 headers: { "RequestVerificationToken": $('input[name="__RequestVerificationToken"]').val() },
-                data: JSON.stringify({ transactionHash: $("#txid").val() }) }).then(x => renderStatus(x.status, x.reason));
+                data: JSON.stringify({ transactionHash: $("#txid").val(), transferKey: $("#transfer-key").val() || null })
+            }).then(x => {
+                if (x.candidates && x.candidates.length > 1) {
+                    $('#transfer-key').empty().append('<option value="">请选择转账事件</option>');
+                    x.candidates.forEach(c => $('#transfer-key').append($('<option>').val(c.transferKey).text(`${c.transferKey} — ${c.amount}`)));
+                    $('#transfer-key').removeClass('d-none');
+                }
+                renderStatus(x.status, x.reason);
+            });
         });
         function renderStatus(status, reason) {
             const labels = { Waiting: '等待链上到账', Pending: '等待链上到账', Unmatched: '未发现交易',

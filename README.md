@@ -129,6 +129,8 @@ USDT-TRC20打赏地址: TKGTx4pCKiKQbk8evXHTborfZn754TGViP
 
 `StaticPaymentMatch` 配置：`Enabled` 控制该功能；`AutoWindowMinutes` 是普通窗口；`LatePaymentRetentionHours` 是延迟到账保留窗口；`MaxUnderpayUsd` 与 `MaxUnderpayPercent` 共同限制少付价值（取较小者）；`AcceptOverpay` 允许多付完成；`CreditOverpay` 必须保持 `false` 以免多付计入余额；`AmbiguousMatchAction` 默认 `RequireTxId`；`BlockTimeSkewSeconds` 仅容忍节点时间戳小幅偏差。多付部分不退回、不计入余额。
 
-EVM 扫描只接受链上 `to` 与配置地址一致（大小写不敏感）的成功、足够确认的转入；ERC20 还必须匹配配置合约和 decimals。原生、内部、Token 事件分别使用 `native`、`trace:<traceId>`、`log:<logIndex>` 作为稳定事件键。TRON/EVM 的每网络、资产和地址扫描进度持久化在 `ChainScanCursor`，首次启动回看完整静态保留期，后续从游标并保留重叠范围恢复。
+EVM 扫描只接受链上 `to` 与配置地址一致（大小写不敏感）的成功、足够确认的转入；ERC20 的 `tokentx` 结果只用于发现交易哈希，最终状态、合约、收款地址、金额和真实 `logIndex` 均从 JSON-RPC Receipt 验证和解析。同一批次的相同哈希只查询一次 Receipt。原生、内部、Token 事件分别使用 `native`、`trace:<traceId>`、`log:<logIndex>` 作为稳定事件键。TRON/EVM 的每网络、资产、地址及扫描来源进度持久化在 `ChainScanCursor`；EVM 使用升序 `page/offset` 完整读取区块范围，TRON 固定本轮 `max_timestamp` 并持续使用 `meta.fingerprint` 翻页。只有完整范围成功后才推进主游标，重叠区块依靠链上事件唯一键去重；TRON 还会保存页间 continuation 供重启恢复。
 
-EVM 代币配置应显式填写 `Decimals`。兼容旧配置时，缺失该字段的 USDT/USDC 会暂按 6 位运行并输出升级警告；其他 Token 缭失则拒绝启动。TxID 主动查询需要为每条 EVM 链配置 `RpcHost`，resolver 通过 JSON-RPC 查询 transaction、receipt、chain id、最新区块和交易区块；ERC20 只从成功 receipt 的真实 `Transfer` 日志读取金额及 `logIndex`。
+EVM 代币配置应显式填写 `Decimals`。兼容旧配置时，缺失该字段的 USDT/USDC 会暂按 6 位运行并输出升级警告；其他 Token 缺失则拒绝启动。静态地址模式下，每条已启用 EVM 链必须配置合法的 HTTP/HTTPS `RpcHost`，缺失或格式错误会在启动时明确报出链名并停止；该地址用于 transaction、receipt、chain id、最新区块和交易区块的权威 JSON-RPC 查询，请勿把带密钥的完整 URL 写入日志。RPC 故障与“交易不存在”分别返回。
+
+交易哈希在任何查询及写库前都会规范化：EVM 为保留 `0x` 前缀的 64 位小写十六进制，TRON 为不带前缀的 64 位大写十六进制。升级迁移会合并未绑定或绑定同一订单的大小写重复项；若同一规范化事件已经绑定不同订单则事务立即失败并列出冲突订单，绝不静默覆盖。

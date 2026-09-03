@@ -68,27 +68,24 @@ namespace TokenPay.BgServices
                 {
                     continue;
                 }
-                var query = new Dictionary<string, object>();
-                if (OnlyConfirmed)
+                var maxTimestamp = DateTime.UtcNow.ToUnixTimeStamp();
+                var data = await ScanPagination.ReadTronAsync<TronTransaction>(async (fingerprint, ct) =>
                 {
-                    query.Add("only_confirmed", true);
-                }
-                query.Add("only_to", true);
-                query.Add("limit", 50);
-                query.Add("min_timestamp", cursor.LastBlockTimeUtc.AddMinutes(-2).ToUnixTimeStamp());
-                query.Add("contract_address", ContractAddress);
-                var req = BaseUrl
-                    .AppendPathSegment($"v1/accounts/{address}/transactions/trc20")
-                    .SetQueryParams(query)
-                    .WithTimeout(15);
-                if (_env.IsProduction())
-                    req = req.WithHeader("TRON-PRO-API-KEY", _configuration.GetValue<string>("TRON-PRO-API-KEY"));
-                var result = await req
-                    .GetJsonAsync<BaseResponse<TronTransaction>>();
+                    var query = new Dictionary<string, object> { ["only_to"] = true, ["limit"] = 50,
+                        ["order_by"] = "block_timestamp,asc", ["min_timestamp"] = cursor.LastBlockTimeUtc.AddMinutes(-2).ToUnixTimeStamp(),
+                        ["max_timestamp"] = maxTimestamp, ["contract_address"] = ContractAddress };
+                    if (OnlyConfirmed) query["only_confirmed"] = true;
+                    if (!string.IsNullOrWhiteSpace(fingerprint)) query["fingerprint"] = fingerprint;
+                    var req = BaseUrl.AppendPathSegment($"v1/accounts/{address}/transactions/trc20").SetQueryParams(query).WithTimeout(15);
+                    if (_env.IsProduction()) req = req.WithHeader("TRON-PRO-API-KEY", _configuration.GetValue<string>("TRON-PRO-API-KEY"));
+                    var page = await req.GetJsonAsync<BaseResponse<TronTransaction>>(cancellationToken: ct);
+                    return (page.Success, (IReadOnlyList<TronTransaction>)(page.Data ?? []), page.Meta?.Fingerprint);
+                }, cursor.ContinuationToken, async (token, ct) =>
+                    await cursors.AdvanceAsync(cursor, cursor.LastBlockNumber, cursor.LastBlockTimeUtc, token, ct), stoppingToken);
 
-                if (result.Success && result.Data?.Count > 0)
+                if (data.Count > 0)
                 {
-                    foreach (var item in result.Data)
+                    foreach (var item in data)
                     {
                         //合约地址不匹配
                         if (item.TokenInfo?.Address != ContractAddress) continue;
@@ -155,9 +152,9 @@ namespace TokenPay.BgServices
                             }
                         }
                     }
-                    var newest = result.Data.Max(x => x.BlockTimestamp).ToDateTime();
-                    await cursors.AdvanceAsync(cursor, 0, newest, null, stoppingToken);
                 }
+                var completedThrough = data.Count > 0 ? data.Max(x => x.BlockTimestamp).ToDateTime() : DateTime.UtcNow;
+                await cursors.AdvanceAsync(cursor, 0, completedThrough, null, stoppingToken);
             }
         }
         private async Task SendAdminMessage(TokenOrders order)

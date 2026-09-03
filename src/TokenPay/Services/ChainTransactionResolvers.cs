@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Numerics;
 using System.Text;
 using Newtonsoft.Json.Linq;
 using TokenPay.Domains;
@@ -16,6 +15,7 @@ public sealed class TronChainTransactionResolver(IHttpClientFactory clients, ICo
 
     public async Task<IReadOnlyList<ObservedTransfer>> ResolveAsync(TokenOrders order, string transactionHash, CancellationToken ct)
     {
+        transactionHash = ChainTransactionHash.Normalize("TRON", transactionHash);
         var host = environment.IsProduction() ? configuration.GetValue("TronApiHost", "https://api.trongrid.io")! : "https://api.shasta.trongrid.io";
         var client = clients.CreateClient();
         if (environment.IsProduction()) client.DefaultRequestHeaders.TryAddWithoutValidation("TRON-PRO-API-KEY", configuration["TRON-PRO-API-KEY"]);
@@ -52,7 +52,8 @@ public sealed class TronChainTransactionResolver(IHttpClientFactory clients, ICo
             var to = e["result"]?.Value<string>("to");
             if (!AddressEquals(to, order.ToAddress)) continue;
             var amount = ParseInteger(e["result"]?.Value<string>("value")) / 1_000_000m;
-            var index = e.Value<int?>("event_index") ?? i;
+            var index = e.Value<int?>("event_index");
+            if (!index.HasValue) continue;
             result.Add(new("TRON", "USDT_TRC20", contractAddress, transactionHash, $"event:{index}",
                 e["result"]?.Value<string>("from"), order.ToAddress, amount, block, UnixMilliseconds(timestamp), confirmations));
         }
@@ -90,11 +91,23 @@ public sealed class EvmChainTransactionResolver(IHttpClientFactory clients, List
     {
         var parts = order.Currency.Split('_');
         var chain = chains.FirstOrDefault(x => x.Enable && x.ChainNameEN == parts.ElementAtOrDefault(1));
-        if (chain == null || string.IsNullOrWhiteSpace(chain.RpcHost)) return [];
+        if (chain == null) return [];
+        if (string.IsNullOrWhiteSpace(chain.RpcHost)) throw new ChainQueryException($"{parts.ElementAtOrDefault(1)} chain RPC is not configured.");
+        var assetIsNative = parts.Length == 3 && parts[2] == chain.BaseCoin;
+        var token = assetIsNative ? null : chain.ERC20?.FirstOrDefault(x => parts.Contains(x.Name, StringComparer.Ordinal));
+        return await ResolveTransfersAsync(chain, order.Currency, token, order.ToAddress, transactionHash, ct);
+    }
+
+    public async Task<IReadOnlyList<ObservedTransfer>> ResolveTransfersAsync(EVMChain chain, string asset, EVMErc20? token,
+        string address, string transactionHash, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(chain.RpcHost)) throw new ChainQueryException($"{chain.ChainNameEN} chain RPC is not configured.");
+        transactionHash = ChainTransactionHash.Normalize(chain.ChainNameEN, transactionHash);
         var client = clients.CreateClient();
         var tx = await Rpc(client, chain.RpcHost, "eth_getTransactionByHash", [transactionHash], ct);
         var receipt = await Rpc(client, chain.RpcHost, "eth_getTransactionReceipt", [transactionHash], ct);
-        if (tx == null || receipt == null || Hex(receipt.Value<string>("status")) != 1) return [];
+        if (tx == null || receipt == null) return [];
+        if (Hex(receipt.Value<string>("status")) != 1) return [];
         var chainId = await RpcValue(client, chain.RpcHost, "eth_chainId", [], ct);
         if (Hex(chainId) != chain.ChainId) return [];
         var blockNumber = Hex(receipt.Value<string>("blockNumber"));
@@ -103,15 +116,13 @@ public sealed class EvmChainTransactionResolver(IHttpClientFactory clients, List
         if (confirmations < chain.Confirmations) return [];
         var block = await Rpc(client, chain.RpcHost, "eth_getBlockByNumber", [receipt.Value<string>("blockNumber")!, false], ct);
         var time = DateTimeOffset.FromUnixTimeSeconds(Hex(block?.Value<string>("timestamp"))).UtcDateTime;
-        var assetIsNative = parts.Length == 3 && parts[2] == chain.BaseCoin;
-        if (assetIsNative)
+        if (token == null)
         {
             var to = tx!.Value<string>("to");
-            if (!AddressEquals(to, order.ToAddress)) return [];
-            return [new(chain.ChainNameEN, order.Currency, null, transactionHash, "native", tx.Value<string>("from"), to!,
-                WeiToDecimal(tx.Value<string>("value"), chain.Decimals), blockNumber, time, confirmations)];
+            if (!AddressEquals(to, address)) return [];
+            return [new(chain.ChainNameEN, asset, null, transactionHash, "native", tx.Value<string>("from"), to!,
+                EvmValueConverter.ToDecimal(tx.Value<string>("value")!, chain.Decimals), blockNumber, time, confirmations)];
         }
-        var token = chain.ERC20?.FirstOrDefault(x => parts.Contains(x.Name, StringComparer.Ordinal));
         if (token?.Decimals == null) return [];
         var result = new List<ObservedTransfer>();
         foreach (var log in receipt["logs"] as JArray ?? [])
@@ -119,11 +130,13 @@ public sealed class EvmChainTransactionResolver(IHttpClientFactory clients, List
             var topics = log["topics"] as JArray;
             if (!AddressEquals(log.Value<string>("address"), token.ContractAddress) || topics?.Count < 3 ||
                 !string.Equals(topics![0]?.ToString(), TransferTopic, StringComparison.OrdinalIgnoreCase)) continue;
+            if (topics[1]?.ToString().Length < 40 || topics[2]?.ToString().Length < 40 || string.IsNullOrWhiteSpace(log.Value<string>("logIndex")))
+                continue;
             var to = "0x" + topics[2]!.ToString()[^40..];
-            if (!AddressEquals(to, order.ToAddress)) continue;
-            result.Add(new(chain.ChainNameEN, order.Currency, token.ContractAddress, transactionHash,
+            if (!AddressEquals(to, address)) continue;
+            result.Add(new(chain.ChainNameEN, asset, token.ContractAddress, transactionHash,
                 $"log:{Hex(log.Value<string>("logIndex"))}", "0x" + topics[1]!.ToString()[^40..], to,
-                WeiToDecimal(log.Value<string>("data"), token.Decimals), blockNumber, time, confirmations));
+                EvmValueConverter.ToDecimal(log.Value<string>("data")!, token.Decimals.Value), blockNumber, time, confirmations));
         }
         return result;
     }
@@ -131,21 +144,20 @@ public sealed class EvmChainTransactionResolver(IHttpClientFactory clients, List
     {
         var payload = new JObject { ["jsonrpc"] = "2.0", ["id"] = 1, ["method"] = method, ["params"] = JArray.FromObject(parameters) };
         using var response = await client.PostAsync(host, new StringContent(payload.ToString(), Encoding.UTF8, "application/json"), ct);
-        if (!response.IsSuccessStatusCode) return null;
-        return JObject.Parse(await response.Content.ReadAsStringAsync(ct))["result"] as JObject;
+        if (!response.IsSuccessStatusCode) throw new ChainQueryException($"Chain query failed with HTTP {(int)response.StatusCode}.");
+        var json = JObject.Parse(await response.Content.ReadAsStringAsync(ct));
+        if (json["error"] != null) throw new ChainQueryException("Chain JSON-RPC returned an error.");
+        return json["result"] as JObject;
     }
     private static async Task<string?> RpcValue(HttpClient c, string h, string m, object[] p, CancellationToken ct)
     {
         var payload = new JObject { ["jsonrpc"] = "2.0", ["id"] = 1, ["method"] = m, ["params"] = JArray.FromObject(p) };
         using var response = await c.PostAsync(h, new StringContent(payload.ToString(), Encoding.UTF8, "application/json"), ct);
-        return response.IsSuccessStatusCode ? JObject.Parse(await response.Content.ReadAsStringAsync(ct))["result"]?.ToString() : null;
+        if (!response.IsSuccessStatusCode) throw new ChainQueryException($"Chain query failed with HTTP {(int)response.StatusCode}.");
+        var json = JObject.Parse(await response.Content.ReadAsStringAsync(ct));
+        if (json["error"] != null) throw new ChainQueryException("Chain JSON-RPC returned an error.");
+        return json["result"]?.ToString();
     }
     private static long Hex(string? value) => string.IsNullOrWhiteSpace(value) ? 0 : Convert.ToInt64(value.StartsWith("0x") ? value[2..] : value, 16);
-    private static decimal WeiToDecimal(string? value, int? decimals)
-    {
-        if (decimals == null || string.IsNullOrWhiteSpace(value)) return 0;
-        var integer = BigInteger.Parse(value.StartsWith("0x") ? value[2..] : value, value.StartsWith("0x") ? NumberStyles.AllowHexSpecifier : NumberStyles.Integer);
-        return (decimal)integer / Helper.PaymentAmountCalculator.DecimalPower(decimals.Value);
-    }
     private static bool AddressEquals(string? a, string? b) => string.Equals(a?.TrimStart('0'), b?.TrimStart('0'), StringComparison.OrdinalIgnoreCase);
 }

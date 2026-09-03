@@ -576,7 +576,7 @@ namespace TokenPay.Controllers
         {
             var result = await _staticMatcher.ClaimByTxIdAsync(id, model.TransactionHash, model.TransferKey,
                 HttpContext.Connection.RemoteIpAddress?.ToString(), cancellationToken);
-            return Json(new { status = result.Status.ToString(), result.Reason });
+            return Json(new { status = result.Status.ToString(), result.Reason, result.Candidates });
         }
 
         public sealed record TxIdClaim(string TransactionHash, string? TransferKey);

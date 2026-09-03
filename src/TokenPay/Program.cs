@@ -61,6 +61,7 @@ var EVMChains = Configuration.GetSection("EVMChains").Get<List<EVMChain>>() ?? n
 Services.AddSingleton(EVMChains);
 
 var UseDynamicAddress = Configuration.GetValue("UseDynamicAddress", true);
+EvmConfigurationValidator.ValidateRpcHosts(EVMChains, UseDynamicAddress);
 if (!UseDynamicAddress && !Configuration.GetValue("StaticPaymentMatch:Enabled", true))
     throw new InvalidOperationException("UseDynamicAddress=false requires StaticPaymentMatch.Enabled=true; refusing to silently disable static payments.");
 if (!UseDynamicAddress && (!Configuration.GetValue("StaticPaymentMatch:AcceptOverpay", true)
@@ -130,6 +131,11 @@ IFreeSql fsql = new FreeSqlBuilder()
 
 if (!UseDynamicAddress)
 {
+    fsql.CodeFirst.SyncStructure<TokenOrders>();
+    fsql.CodeFirst.SyncStructure<ChainPayment>();
+    fsql.CodeFirst.SyncStructure<PaymentClaim>();
+    fsql.CodeFirst.SyncStructure<ChainScanCursor>();
+    TransactionHashMigration.Run(fsql);
     var migrated = fsql.Update<TokenOrders>()
         .Set(x => x.IsStaticAddress, true)
         .SetRaw("MinimumPaidAmount = Amount")
@@ -144,8 +150,10 @@ Services.AddFreeRepository();
 Services.Configure<StaticPaymentMatchOptions>(Configuration.GetSection(StaticPaymentMatchOptions.SectionName));
 Services.AddSingleton<IStaticPaymentMatcher, StaticPaymentMatcher>();
 Services.AddHttpClient();
-Services.AddSingleton<IChainTransactionResolver, TronChainTransactionResolver>();
-Services.AddSingleton<IChainTransactionResolver, EvmChainTransactionResolver>();
+Services.AddSingleton<TronChainTransactionResolver>();
+Services.AddSingleton<EvmChainTransactionResolver>();
+Services.AddSingleton<IChainTransactionResolver>(sp => sp.GetRequiredService<TronChainTransactionResolver>());
+Services.AddSingleton<IChainTransactionResolver>(sp => sp.GetRequiredService<EvmChainTransactionResolver>());
 Services.AddSingleton<ChainScanCursorStore>();
 Services.AddHostedService<OrderExpiredService>();
 Services.AddHostedService<StaticPaymentRetryService>();
