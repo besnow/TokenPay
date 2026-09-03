@@ -18,7 +18,8 @@ public class StaticPaymentMatcherTests : IDisposable
     public StaticPaymentMatcherTests()
     {
         _db = new FreeSqlBuilder().UseConnectionString(DataType.Sqlite, $"Data Source={_file}").UseAutoSyncStructure(true).Build();
-        _db.CodeFirst.SyncStructure<TokenOrders, ChainPayment>();
+        _db.CodeFirst.SyncStructure<TokenOrders>();
+        _db.CodeFirst.SyncStructure<ChainPayment>();
         _matcher = new(_db, Options.Create(new StaticPaymentMatchOptions()), _channel, NullLogger<StaticPaymentMatcher>.Instance);
     }
 
@@ -33,15 +34,34 @@ public class StaticPaymentMatcherTests : IDisposable
     }
 
     [Fact]
-    public async Task Multiple_candidates_are_never_guessed_but_txid_claim_resolves_them()
+    public async Task Public_txid_never_claims_a_transfer_with_multiple_candidates()
     {
         var first = await AddOrder(DateTime.UtcNow.AddMinutes(-10));
         await AddOrder(DateTime.UtcNow.AddMinutes(-5));
-        var observed = await _matcher.ObserveAsync(Transfer(DateTime.UtcNow, "ambiguous", 10m));
+        var observed = await _matcher.ObserveAsync(Transfer(DateTime.UtcNow, "aaaaaaaaaaaaaaaa", 10m));
         Assert.Equal(PaymentMatchStatus.Ambiguous, observed.Status);
         Assert.Empty(await _db.Select<TokenOrders>().Where(x => x.Status == OrderStatus.Paid).ToListAsync());
-        var claimed = await _matcher.ClaimByTxIdAsync(first.Id, "ambiguous", 7);
-        Assert.Equal(PaymentMatchStatus.Matched, claimed.Status);
+        var claimed = await _matcher.ClaimByTxIdAsync(first.Id, "aaaaaaaaaaaaaaaa", 7);
+        Assert.Equal(PaymentMatchStatus.ManualReview, claimed.Status);
+        Assert.Empty(await _db.Select<TokenOrders>().Where(x => x.Status == OrderStatus.Paid).ToListAsync());
+    }
+
+    [Fact]
+    public async Task Abandoned_old_order_does_not_block_a_new_order()
+    {
+        await AddOrder(DateTime.UtcNow.AddHours(-2));
+        var recent = await AddOrder(DateTime.UtcNow.AddMinutes(-5));
+        var result = await _matcher.ObserveAsync(Transfer(DateTime.UtcNow, "bbbbbbbbbbbbbbbb", 10m));
+        Assert.Equal(recent.Id, result.OrderId);
+    }
+
+    [Fact]
+    public async Task Report_extends_only_the_late_order_window()
+    {
+        var late = await AddOrder(DateTime.UtcNow.AddHours(-2));
+        await _matcher.ReportPaymentAsync(late.Id);
+        var result = await _matcher.ObserveAsync(Transfer(DateTime.UtcNow, "cccccccccccccccc", 10m));
+        Assert.Equal(late.Id, result.OrderId);
     }
 
     [Fact]
@@ -49,6 +69,7 @@ public class StaticPaymentMatcherTests : IDisposable
     {
         await AddOrder(DateTime.UtcNow);
         Assert.Equal(PaymentMatchStatus.Unmatched, (await _matcher.ObserveAsync(Transfer(DateTime.UtcNow.AddMinutes(-2), "before", 10m))).Status);
+        await _db.Delete<TokenOrders>().Where(x => x.Status == OrderStatus.Pending).ExecuteAffrowsAsync();
         var old = await AddOrder(DateTime.UtcNow.AddHours(-25));
         Assert.Equal(PaymentMatchStatus.Expired, (await _matcher.ObserveAsync(Transfer(old.CreateTime.AddHours(25), "late", 10m) with { BlockTimeUtc = old.CreateTime.AddHours(25) })).Status);
     }

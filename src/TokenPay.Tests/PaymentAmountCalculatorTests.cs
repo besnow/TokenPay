@@ -42,4 +42,11 @@ public class PaymentAmountCalculatorTests
         Assert.Equal(0.0001m, result.allowedUnderpayCoin);
         Assert.Equal(0.001134567890123456m, result.minimumPaidAmount);
     }
+
+    [Fact]
+    public void Nine_point_nine_usdt_eth_allowance_is_not_zero()
+    {
+        var result = PaymentAmountCalculator.Calculate(0.0033m, 9.9m, 3000m, Options, 18);
+        Assert.Equal(0.00033m, result.allowedUnderpayCoin);
+    }
 }

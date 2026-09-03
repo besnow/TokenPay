@@ -8,6 +8,10 @@ ALTER TABLE TokenOrders ADD COLUMN MinimumPaidAmount DECIMAL(38,18) NOT NULL DEF
 ALTER TABLE TokenOrders ADD COLUMN IsStaticAddress INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE TokenOrders ADD COLUMN ChainPaymentId TEXT NULL;
 ALTER TABLE TokenOrders ADD COLUMN IsLatePayment INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE TokenOrders ADD COLUMN PaymentMatchStatus INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE TokenOrders ADD COLUMN PaymentMatchReason TEXT NULL;
+ALTER TABLE TokenOrders ADD COLUMN PaymentReportedAtUtc TEXT NULL;
+ALTER TABLE TokenOrders ADD COLUMN MatchMethod INTEGER NULL;
 CREATE TABLE ChainPayment (
   Id TEXT NOT NULL PRIMARY KEY, Network TEXT NOT NULL, Asset TEXT NOT NULL,
   TokenContract TEXT NULL, TransactionHash TEXT NOT NULL, TransferIndex INTEGER NOT NULL,
@@ -18,3 +22,7 @@ CREATE TABLE ChainPayment (
 );
 CREATE UNIQUE INDEX uk_chain_payment ON ChainPayment(Network, TransactionHash, TransferIndex);
 COMMIT;
+
+-- Application startup performs the configuration-dependent data migration when
+-- UseDynamicAddress=false: only Pending legacy rows are marked static and their
+-- MinimumPaidAmount is initialized from Amount. Historical rows are untouched.

@@ -121,6 +121,8 @@ USDT-TRC20打赏地址: TKGTx4pCKiKQbk8evXHTborfZn754TGViP
 
 ## 静态地址到账匹配
 
-静态地址模式（`UseDynamicAddress: false`）会从订单创建时立即由后台扫描，不依赖支付页或“我已支付”按钮。到账只按**网络、币种、收款地址和时间窗口**寻找订单；金额仅用于检查是否达到订单中锁定的 `MinimumPaidAmount`，不会作为金额指纹。唯一候选自动完成，多个候选绝不猜测并要求用户提供 TxID。普通窗口为 60 分钟，60 分钟后至 24 小时为延迟到账，24 小时后转为异常到账。
+静态地址模式（`UseDynamicAddress: false`）会从订单创建时立即由后台扫描，不依赖支付页或“我已支付”按钮。到账只按**网络、币种、收款地址和时间窗口**寻找订单；金额仅用于检查是否达到订单中锁定的 `MinimumPaidAmount`，不会作为金额指纹。唯一候选自动完成，多个候选绝不猜测。普通候选窗口为创建后 60 分钟；用户幂等点击“我已支付”后，该订单才作为延迟候选保留至创建后 24 小时，按钮只重查该订单关联的近期交易。公开 TxID 在多个候选时只进入人工审核，不能抢占到账。
+
+创建订单响应同时提供 `AutoPaymentExpireTime`（普通自动窗口）和 `LatePaymentRetentionTime`（异常到账、TxID 处理保留期）。升级后在静态部署中，程序仅迁移仍为 `Pending` 的旧订单，并以原始 `Amount` 初始化最低到账，不修改历史已支付或已过期订单。关闭 `StaticPaymentMatch.Enabled` 的静态部署会在启动时明确拒绝运行，避免静默停止回调。
 
 `StaticPaymentMatch` 配置：`Enabled` 控制该功能；`AutoWindowMinutes` 是普通窗口；`LatePaymentRetentionHours` 是延迟到账保留窗口；`MaxUnderpayUsd` 与 `MaxUnderpayPercent` 共同限制少付价值（取较小者）；`AcceptOverpay` 允许多付完成；`CreditOverpay` 必须保持 `false` 以免多付计入余额；`AmbiguousMatchAction` 默认 `RequireTxId`；`BlockTimeSkewSeconds` 仅容忍节点时间戳小幅偏差。多付部分不退回、不计入余额。

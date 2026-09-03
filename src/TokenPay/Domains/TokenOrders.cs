@@ -73,6 +73,11 @@ namespace TokenPay.Domains
         public Guid? ChainPaymentId { get; set; }
         /// <summary>是否为 60 分钟后的延迟到账。</summary>
         public bool IsLatePayment { get; set; }
+        public PaymentMatchStatus PaymentMatchStatus { get; set; } = PaymentMatchStatus.Waiting;
+        [Column(StringLength = -1)]
+        public string? PaymentMatchReason { get; set; }
+        public DateTime? PaymentReportedAtUtc { get; set; }
+        public PaymentMatchMethod? MatchMethod { get; set; }
         /// <summary>
         /// 钱包地址
         /// </summary>
@@ -106,7 +111,8 @@ namespace TokenPay.Domains
         /// 最后通知时间
         /// </summary>
         public DateTime? LastNotifyTime { get; set; }
-        public DateTime CreateTime { get; set; } = DateTime.UtcNow;
+        // Keep the historical local-time convention; static matching converts explicitly at its boundary.
+        public DateTime CreateTime { get; set; } = DateTime.Now;
     }
     public enum OrderStatus
     {

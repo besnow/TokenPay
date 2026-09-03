@@ -36,7 +36,8 @@ namespace TokenPay.Controllers
             var decimals = currency switch
             {
                 "TRX" => _configuration.GetValue("Decimals:TRX", 2),
-                "EVM_ETH" => _configuration.GetValue("Decimals:ETH", 5),
+                _ when currency.StartsWith("EVM_") && currency.Split('_').Last() == "ETH" => _configuration.GetValue("Decimals:ETH", 8),
+                _ when currency.Contains("USDT", StringComparison.OrdinalIgnoreCase) => _configuration.GetValue("Decimals:USDT", 6),
                 _ => _configuration.GetValue($"Decimals:{currency}", 4)
             };
 
@@ -174,11 +175,9 @@ namespace TokenPay.Controllers
             }
             if (order.Status == OrderStatus.Pending && order.IsStaticAddress)
             {
-                var ambiguous = await _repository.Orm.Select<ChainPayment>()
-                    .Where(x => x.Asset == order.Currency && x.ToAddress == order.ToAddress && x.MatchStatus == PaymentMatchStatus.Ambiguous)
-                    .Where(x => x.BlockTime >= order.CreateTime && x.BlockTime <= order.CreateTime.AddHours(_staticOptions.LatePaymentRetentionHours))
-                    .AnyAsync();
-                if (ambiguous) return Content(OrderStatus.Ambiguous.ToString());
+                return Content(order.PaymentMatchStatus == PaymentMatchStatus.Waiting
+                    ? OrderStatus.Pending.ToString()
+                    : order.PaymentMatchStatus.ToString());
             }
             return Content(order.Status.ToString());
         }
@@ -343,6 +342,8 @@ namespace TokenPay.Controllers
                 { "BlockChainName", order.Currency.ToBlockchainEnglishName(_chains) },
                 { "CurrencyName", order.Currency.ToCurrency(_chains) },
                 { "ExpireTime", order.CreateTime.AddSeconds(ExpireTime).ToString("yyyy-MM-dd HH:mm:ss")},
+                { "AutoPaymentExpireTime", order.CreateTime.AddMinutes(_staticOptions.AutoWindowMinutes).ToString("yyyy-MM-dd HH:mm:ss")},
+                { "LatePaymentRetentionTime", order.CreateTime.AddHours(_staticOptions.LatePaymentRetentionHours).ToString("yyyy-MM-dd HH:mm:ss")},
                 { "QrCodeBase64", "data:image/png;base64," + Convert.ToBase64String(CreateQrCode(order.ToAddress))},
                 { "QrCodeLink", Host + Url.Action(nameof(GetQrCode), new { Id = order.Id })},
             };
@@ -547,7 +548,7 @@ namespace TokenPay.Controllers
         [Route("/payment/{id:guid}/recheck")]
         public async Task<IActionResult> Recheck(Guid id, CancellationToken cancellationToken)
         {
-            await _staticMatcher.RetryUnmatchedAsync(cancellationToken);
+            await _staticMatcher.ReportPaymentAsync(id, cancellationToken);
             var order = await _repository.Where(x => x.Id == id).FirstAsync();
             return Json(new { status = order?.Status.ToString() ?? "NotFound" });
         }

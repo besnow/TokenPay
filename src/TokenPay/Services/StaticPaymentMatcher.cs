@@ -2,6 +2,7 @@ using System.Threading.Channels;
 using FreeSql;
 using Microsoft.Extensions.Options;
 using TokenPay.Domains;
+using TokenPay.Helper;
 using TokenPay.Models;
 
 namespace TokenPay.Services;
@@ -17,6 +18,7 @@ public interface IStaticPaymentMatcher
 {
     Task<MatchResult> ObserveAsync(ObservedTransfer transfer, CancellationToken cancellationToken = default);
     Task<MatchResult> ClaimByTxIdAsync(Guid orderId, string transactionHash, int? transferIndex = null, CancellationToken cancellationToken = default);
+    Task<MatchResult> ReportPaymentAsync(Guid orderId, CancellationToken cancellationToken = default);
     Task RetryUnmatchedAsync(CancellationToken cancellationToken = default);
 }
 
@@ -49,17 +51,44 @@ public sealed class StaticPaymentMatcher : IStaticPaymentMatcher
             Confirmations = transfer.Confirmations, MatchStatus = PaymentMatchStatus.Unmatched
         };
         try { await _db.Insert(payment).ExecuteAffrowsAsync(cancellationToken); }
-        catch { payment = await _db.Select<ChainPayment>().Where(x => x.Network == transfer.Network && x.TransactionHash == transfer.TransactionHash && x.TransferIndex == transfer.TransferIndex).FirstAsync(cancellationToken); }
+        catch (Exception ex) when (IsUniqueConstraintViolation(ex))
+        {
+            payment = await _db.Select<ChainPayment>().Where(x => x.Network == transfer.Network && x.TransactionHash == transfer.TransactionHash && x.TransferIndex == transfer.TransferIndex).FirstAsync(cancellationToken);
+        }
         return await MatchExistingAsync(payment, null, PaymentMatchMethod.TimeUnique, cancellationToken);
     }
 
     public async Task<MatchResult> ClaimByTxIdAsync(Guid orderId, string transactionHash, int? transferIndex = null, CancellationToken cancellationToken = default)
     {
-        var transfers = await _db.Select<ChainPayment>().Where(x => x.TransactionHash == transactionHash)
+        if (string.IsNullOrWhiteSpace(transactionHash) || transactionHash.Length is < 16 or > 128 || !transactionHash.All(c => char.IsAsciiLetterOrDigit(c) || c is 'x' or 'X'))
+            return new(PaymentMatchStatus.Unmatched, Reason: "invalid transaction hash");
+        var order = await _db.Select<TokenOrders>().Where(x => x.Id == orderId && x.IsStaticAddress).FirstAsync(cancellationToken);
+        if (order == null) return new(PaymentMatchStatus.Unmatched, Reason: "order not found");
+        var transfers = await _db.Select<ChainPayment>().Where(x => x.TransactionHash == transactionHash && x.Asset == order.Currency)
             .WhereIf(transferIndex.HasValue, x => x.TransferIndex == transferIndex).ToListAsync(cancellationToken);
         if (transfers.Count == 0) return new(PaymentMatchStatus.Unmatched, Reason: "交易尚未由已确认的链上扫描发现");
         if (transfers.Count > 1 && !transferIndex.HasValue) return new(PaymentMatchStatus.Ambiguous, Reason: "该交易包含多笔转账，请指定日志序号");
         return await MatchExistingAsync(transfers.Single(), orderId, PaymentMatchMethod.TxIdClaim, cancellationToken);
+    }
+
+    public async Task<MatchResult> ReportPaymentAsync(Guid orderId, CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+        var affected = await _db.Update<TokenOrders>()
+            .Set(x => x.PaymentReportedAtUtc, now)
+            .Where(x => x.Id == orderId && x.IsStaticAddress && x.Status == OrderStatus.Pending && x.PaymentReportedAtUtc == null)
+            .ExecuteAffrowsAsync(cancellationToken);
+        var order = await _db.Select<TokenOrders>().Where(x => x.Id == orderId && x.IsStaticAddress).FirstAsync(cancellationToken);
+        if (order == null) return new(PaymentMatchStatus.Unmatched, Reason: "order not found");
+        var since = now.AddMinutes(-30);
+        var payments = await _db.Select<ChainPayment>()
+            .Where(x => x.Asset == order.Currency && x.ToAddress == order.ToAddress && x.MatchedOrderId == null)
+            .Where(x => x.BlockTime >= since).ToListAsync(cancellationToken);
+        MatchResult result = new(order.PaymentMatchStatus, order.Id);
+        foreach (var payment in payments)
+            result = await MatchExistingAsync(payment, null, PaymentMatchMethod.TimeUnique, cancellationToken);
+        _logger.LogInformation("订单 {OrderId} 已报告付款（新记录={NewReport}），仅重查该订单地址的近期到账", orderId, affected == 1);
+        return result;
     }
 
     public async Task RetryUnmatchedAsync(CancellationToken cancellationToken = default)
@@ -80,18 +109,22 @@ public sealed class StaticPaymentMatcher : IStaticPaymentMatcher
         var latestCreation = blockTime.AddSeconds(_options.BlockTimeSkewSeconds);
         var query = _db.Select<TokenOrders>()
             .Where(x => x.IsStaticAddress && x.Status == OrderStatus.Pending)
-            .Where(x => x.Currency == payment.Asset && x.ToAddress == payment.ToAddress)
-            .Where(x => x.CreateTime >= earliest && x.CreateTime <= latestCreation);
-        if (claimedOrderId.HasValue) query = query.Where(x => x.Id == claimedOrderId.Value);
-        var temporal = await query.ToListAsync(ct);
+            .Where(x => x.Currency == payment.Asset && x.ToAddress == payment.ToAddress);
+        var retained = await query.ToListAsync(ct);
+        var temporal = retained.Where(x =>
+        {
+            var created = PaymentTime.ToUtc(x.CreateTime);
+            if (created < earliest || created > latestCreation) return false;
+            var normal = created <= blockTime.AddSeconds(_options.BlockTimeSkewSeconds)
+                         && blockTime <= created.AddMinutes(_options.AutoWindowMinutes);
+            var late = x.PaymentReportedAtUtc.HasValue
+                       && blockTime <= created.AddHours(_options.LatePaymentRetentionHours);
+            return normal || late;
+        }).ToList();
         var candidates = temporal.Where(x => payment.ActualAmount >= x.MinimumPaidAmount).ToList();
         if (candidates.Count == 0)
         {
-            var expiredQuery = _db.Select<TokenOrders>()
-                .Where(x => x.IsStaticAddress && x.Status == OrderStatus.Pending)
-                .Where(x => x.Currency == payment.Asset && x.ToAddress == payment.ToAddress && x.CreateTime < earliest);
-            if (claimedOrderId.HasValue) expiredQuery = expiredQuery.Where(x => x.Id == claimedOrderId.Value);
-            var hasExpiredCandidate = temporal.Count == 0 && await expiredQuery.AnyAsync(ct);
+            var hasExpiredCandidate = temporal.Count == 0 && retained.Any(x => PaymentTime.ToUtc(x.CreateTime) < earliest);
             var status = temporal.Count > 0 ? PaymentMatchStatus.AmountInsufficient :
                 hasExpiredCandidate ? PaymentMatchStatus.Expired : PaymentMatchStatus.Unmatched;
             var reason = status switch
@@ -100,12 +133,33 @@ public sealed class StaticPaymentMatcher : IStaticPaymentMatcher
                 PaymentMatchStatus.Expired => "order payment window expired",
                 _ => "no eligible order"
             };
+            if (temporal.Count > 0)
+            {
+                var temporalIds = temporal.Select(o => o.Id).ToArray();
+                await _db.Update<TokenOrders>().Set(x => x.PaymentMatchStatus, status).Set(x => x.PaymentMatchReason, reason)
+                    .Where(x => temporalIds.Contains(x.Id)).ExecuteAffrowsAsync(ct);
+            }
             return await MarkAsync(payment.Id, status, reason, ct);
         }
-        if (candidates.Count > 1 && !claimedOrderId.HasValue)
-            return await MarkAsync(payment.Id, PaymentMatchStatus.Ambiguous, "multiple eligible orders; TxID required", ct);
+        if (candidates.Count > 1)
+        {
+            var candidateIds = candidates.Select(o => o.Id).ToArray();
+            await _db.Update<TokenOrders>().Set(x => x.PaymentMatchStatus, claimedOrderId.HasValue ? PaymentMatchStatus.ManualReview : PaymentMatchStatus.Ambiguous)
+                .Set(x => x.PaymentMatchReason, "multiple eligible orders; never assigned by public TxID")
+                .Where(x => candidateIds.Contains(x.Id)).ExecuteAffrowsAsync(ct);
+            if (claimedOrderId.HasValue)
+                await _db.Update<TokenOrders>().Set(x => x.PaymentMatchStatus, PaymentMatchStatus.ManualReview)
+                    .Set(x => x.PaymentMatchReason, "public TxID has multiple eligible orders")
+                    .Where(x => x.Id == claimedOrderId.Value).ExecuteAffrowsAsync(ct);
+            return await MarkAsync(payment.Id, claimedOrderId.HasValue ? PaymentMatchStatus.ManualReview : PaymentMatchStatus.Ambiguous,
+                "multiple eligible orders; never assigned by public TxID", ct);
+        }
 
         var order = candidates.Single();
+        if (claimedOrderId.HasValue && order.Id != claimedOrderId.Value)
+            return new(PaymentMatchStatus.ManualReview, Reason: "TxID is eligible for another order");
+        if (payment.ActualAmount > order.Amount && !_options.AcceptOverpay)
+            return await MarkAsync(payment.Id, PaymentMatchStatus.AmountInsufficient, "overpayment disabled", ct);
         TokenOrders? completed = null;
         _db.Transaction(() =>
         {
@@ -113,7 +167,8 @@ public sealed class StaticPaymentMatcher : IStaticPaymentMatcher
                 .Set(x => x.Status, OrderStatus.Paid).Set(x => x.ChainPaymentId, payment.Id)
                 .Set(x => x.BlockTransactionId, payment.TransactionHash).Set(x => x.PayAmount, payment.ActualAmount)
                 .Set(x => x.PayTime, blockTime).Set(x => x.FromAddress, payment.FromAddress)
-                .Set(x => x.IsLatePayment, blockTime > EnsureUtc(order.CreateTime).AddMinutes(_options.AutoWindowMinutes))
+                .Set(x => x.PaymentMatchStatus, PaymentMatchStatus.Matched).Set(x => x.MatchMethod, method)
+                .Set(x => x.IsLatePayment, blockTime > PaymentTime.ToUtc(order.CreateTime).AddMinutes(_options.AutoWindowMinutes))
                 .Where(x => x.Id == order.Id && x.Status == OrderStatus.Pending && x.ChainPaymentId == null).ExecuteAffrows();
             if (affected != 1) return;
             var paymentAffected = _db.Update<ChainPayment>()
@@ -136,5 +191,13 @@ public sealed class StaticPaymentMatcher : IStaticPaymentMatcher
         return new(status, Reason: reason);
     }
 
-    private static DateTime EnsureUtc(DateTime value) => value.Kind == DateTimeKind.Utc ? value : DateTime.SpecifyKind(value, DateTimeKind.Utc);
+    private static DateTime EnsureUtc(DateTime value) => PaymentTime.ToUtc(value);
+
+    private static bool IsUniqueConstraintViolation(Exception exception)
+    {
+        for (Exception? current = exception; current != null; current = current.InnerException)
+            if (current.Message.Contains("UNIQUE constraint failed", StringComparison.OrdinalIgnoreCase)
+                || current.Message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
 }

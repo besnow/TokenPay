@@ -26,5 +26,5 @@ public class ChainPayment
     public string? MatchReason { get; set; }
 }
 
-public enum PaymentMatchStatus { Unmatched, Matched, Ambiguous, AmountInsufficient, Expired }
+public enum PaymentMatchStatus { Waiting, Unmatched, Matched, Ambiguous, AmountInsufficient, TxIdSubmitted, ManualReview, Expired }
 public enum PaymentMatchMethod { TimeUnique, TxIdClaim, Manual }

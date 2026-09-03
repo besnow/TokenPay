@@ -60,6 +60,8 @@ var EVMChains = Configuration.GetSection("EVMChains").Get<List<EVMChain>>() ?? n
 Services.AddSingleton(EVMChains);
 
 var UseDynamicAddress = Configuration.GetValue("UseDynamicAddress", true);
+if (!UseDynamicAddress && !Configuration.GetValue("StaticPaymentMatch:Enabled", true))
+    throw new InvalidOperationException("UseDynamicAddress=false requires StaticPaymentMatch.Enabled=true; refusing to silently disable static payments.");
 var UseDynamicAddressAmountMove = Configuration.GetValue("DynamicAddressConfig:AmountMove", false);
 var CollectionEnable = Configuration.GetValue("Collection:Enable", false);
 Log.Information("-------------{value}-------------", "AppSettings");
@@ -106,6 +108,16 @@ IFreeSql fsql = new FreeSqlBuilder()
         .UseAdoConnectionPool(true)
         .UseNoneCommandParameter(true)
         .Build();
+
+if (!UseDynamicAddress)
+{
+    var migrated = fsql.Update<TokenOrders>()
+        .Set(x => x.IsStaticAddress, true)
+        .SetRaw("MinimumPaidAmount = Amount")
+        .Where(x => x.Status == OrderStatus.Pending && !x.IsStaticAddress)
+        .ExecuteAffrows();
+    Log.Information("静态地址升级迁移完成：迁移 {Count} 个 Pending 订单；缺失最低到账按原 Amount 精确匹配", migrated);
+}
 
 Services.AddSingleton(fsql);
 Services.AddScoped<UnitOfWorkManager>();
