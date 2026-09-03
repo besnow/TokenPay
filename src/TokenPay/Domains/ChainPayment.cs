@@ -10,7 +10,6 @@ public class ChainPayment
     public required string Asset { get; set; }
     public string? TokenContract { get; set; }
     public required string TransactionHash { get; set; }
-    public int TransferIndex { get; set; }
     public required string TransferKey { get; set; }
     public string? FromAddress { get; set; }
     public required string ToAddress { get; set; }
@@ -27,5 +26,5 @@ public class ChainPayment
     public string? MatchReason { get; set; }
 }
 
-public enum PaymentMatchStatus { Waiting, Unmatched, Matched, Ambiguous, AmountInsufficient, TxIdSubmitted, ManualReview, Expired }
-public enum PaymentMatchMethod { TimeUnique, TxIdClaim, Manual }
+public enum PaymentMatchStatus { Waiting, Pending, Unmatched, Confirming, Matched, Paid, Ambiguous, AmountInsufficient, ClaimRejected, AlreadyUsed, Expired }
+public enum PaymentMatchMethod { TimeUnique, TxIdClaim }

@@ -71,7 +71,15 @@ foreach (var chain in EVMChains.Where(x => x.Enable))
 {
     if (chain.Decimals is < 0 or > 18) throw new InvalidOperationException($"Invalid decimals for {chain.ChainNameEN}/{chain.BaseCoin}");
     foreach (var token in chain.ERC20 ?? [])
+    {
+        if (token.Decimals == null && (token.Name.Equals("USDT", StringComparison.OrdinalIgnoreCase) || token.Name.Equals("USDC", StringComparison.OrdinalIgnoreCase)))
+        {
+            token.Decimals = 6;
+            Log.Warning("{Chain}/{Token} is missing Decimals; compatibility value 6 is used. Add Decimals explicitly.", chain.ChainNameEN, token.Name);
+        }
+        if (token.Decimals == null) throw new InvalidOperationException($"Token {chain.ChainNameEN}/{token.Name} must configure Decimals explicitly");
         if (token.Decimals is < 0 or > 18) throw new InvalidOperationException($"Invalid decimals for {chain.ChainNameEN}/{token.Name}");
+    }
 }
 var UseDynamicAddressAmountMove = Configuration.GetValue("DynamicAddressConfig:AmountMove", false);
 var CollectionEnable = Configuration.GetValue("Collection:Enable", false);
@@ -135,6 +143,9 @@ Services.AddScoped<UnitOfWorkManager>();
 Services.AddFreeRepository();
 Services.Configure<StaticPaymentMatchOptions>(Configuration.GetSection(StaticPaymentMatchOptions.SectionName));
 Services.AddSingleton<IStaticPaymentMatcher, StaticPaymentMatcher>();
+Services.AddHttpClient();
+Services.AddSingleton<IChainTransactionResolver, TronChainTransactionResolver>();
+Services.AddSingleton<IChainTransactionResolver, EvmChainTransactionResolver>();
 Services.AddSingleton<ChainScanCursorStore>();
 Services.AddHostedService<OrderExpiredService>();
 Services.AddHostedService<StaticPaymentRetryService>();

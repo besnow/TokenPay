@@ -56,7 +56,9 @@ namespace TokenPay.BgServices
 
                     foreach (var address in Address)
                     {
-                        var cursor = await cursors.GetAsync(chain.ChainNameEN, Currency, address,
+                        var cursorExternal = await cursors.GetAsync(chain.ChainNameEN, Currency, address, "NativeExternal",
+                            _configuration.GetValue("StaticPaymentMatch:LatePaymentRetentionHours", 24), stoppingToken);
+                        var cursorInternal = await cursors.GetAsync(chain.ChainNameEN, Currency, address, "NativeInternal",
                             _configuration.GetValue("StaticPaymentMatch:LatePaymentRetentionHours", 24), stoppingToken);
                         //查询此地址待支付订单
                         var orders = await _repository
@@ -157,7 +159,8 @@ namespace TokenPay.BgServices
                             { "offset", 100 },
                             { "sort", "desc" }
                         };
-                        if (cursor.LastBlockNumber > 0) query.Add("startblock", Math.Max(0, cursor.LastBlockNumber - 12));
+                        if (cursorExternal.LastBlockNumber > 0) query.Add("startblock", Math.Max(0, cursorExternal.LastBlockNumber - 12));
+                        query.Add("endblock", Math.Max(0, NowBlockNumber - chain.Confirmations));
                         if (_env.IsProduction())
                             query.Add("apikey", chain.ApiKey);
 
@@ -192,6 +195,7 @@ namespace TokenPay.BgServices
                                 await CheckOrder(item, "native");
                             }
                         }
+                        await cursors.AdvanceAsync(cursorExternal, Math.Max(0, NowBlockNumber - chain.Confirmations), DateTime.UtcNow, null, stoppingToken);
                         #endregion
 
                         #region 内部交易
@@ -205,7 +209,8 @@ namespace TokenPay.BgServices
                             { "offset", 100 },
                             { "sort", "desc" }
                         };
-                        if (cursor.LastBlockNumber > 0) queryInternal.Add("startblock", Math.Max(0, cursor.LastBlockNumber - 12));
+                        if (cursorInternal.LastBlockNumber > 0) queryInternal.Add("startblock", Math.Max(0, cursorInternal.LastBlockNumber - 12));
+                        queryInternal.Add("endblock", Math.Max(0, NowBlockNumber - chain.Confirmations));
                         if (_env.IsProduction())
                             queryInternal.Add("apikey", chain.ApiKey);
 
@@ -241,7 +246,7 @@ namespace TokenPay.BgServices
                         }
                         #endregion
                         if (NowBlockNumber > 0)
-                            await cursors.AdvanceAsync(cursor, NowBlockNumber, DateTime.UtcNow, null, stoppingToken);
+                            await cursors.AdvanceAsync(cursorInternal, Math.Max(0, NowBlockNumber - chain.Confirmations), DateTime.UtcNow, null, stoppingToken);
                     }
                 }
                 catch (Exception e)

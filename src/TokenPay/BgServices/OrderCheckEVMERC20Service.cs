@@ -76,7 +76,7 @@ namespace TokenPay.BgServices
 
             foreach (var address in Address)
             {
-                var cursor = await cursors.GetAsync(chain.ChainNameEN, Currency, address,
+                var cursor = await cursors.GetAsync(chain.ChainNameEN, Currency, address, $"ERC20:{erc20.ContractAddress.ToLowerInvariant()}",
                     _configuration.GetValue("StaticPaymentMatch:LatePaymentRetentionHours", 24), CancellationToken.None);
                 //查询此地址待支付订单
                 var orders = await _repository

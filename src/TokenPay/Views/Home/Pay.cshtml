@@ -133,11 +133,13 @@ else
         });
         function renderStatus(status, reason) {
             const labels = { Waiting: '等待链上到账', Pending: '等待链上到账', Unmatched: '未发现交易',
+                Confirming: '交易已发现，等待确认',
                 Matched: '支付成功', Paid: '支付成功', Ambiguous: '存在多个候选，请提供TxID',
-                AmountInsufficient: '到账金额不足', TxIdSubmitted: 'TxID已提交，等待人工审核',
-                ManualReview: 'TxID已提交，等待人工审核', Expired: '订单已过期' };
+                AmountInsufficient: '到账金额不足', ClaimRejected: '该交易与当前订单不匹配',
+                AlreadyUsed: '该交易已被其他订单使用', Expired: '订单已过期' };
             $('#payment-status').text(labels[status] || reason || '正在等待确认');
-            if (status === 'Ambiguous' || status === 'ManualReview' || status === 'TxIdSubmitted') $('#txid-box').removeClass('d-none');
+            if (status === 'Ambiguous' || status === 'Unmatched' || status === 'ClaimRejected' || status === 'AlreadyUsed') $('#txid-box').removeClass('d-none');
+            if (status === 'AmountInsufficient') $('#txid-box').addClass('d-none');
         }
         function Check() {
             var RedirectUrl = "@(Model?.RedirectUrl)";
@@ -152,10 +154,10 @@ else
                         } else if (x === 'Ambiguous') {
                             $('#payment-status').text('存在多笔候选，请提供TxID'); $('#txid-box').removeClass('d-none')
                         } else if (x === 'AmountInsufficient') {
-                            $('#payment-status').text('到账金额不足'); $('#txid-box').removeClass('d-none')
+                            renderStatus(x)
                         } else if (x === 'Paid') {
                             clearInterval(Time)
-                            $('#payment-status').text('支付成功'); $('#paid-button').prop('disabled', true).text('已确认支付')
+                            renderStatus(x); $('#paid-button').prop('disabled', true).text('已确认支付')
                             setTimeout(() => {
                                 if (RedirectUrl) {
                                     location = RedirectUrl

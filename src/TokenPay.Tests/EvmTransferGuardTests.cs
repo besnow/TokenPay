@@ -56,7 +56,7 @@ public class EvmTransferGuardTests
     {
         public List<ObservedTransfer> Transfers { get; } = [];
         public Task<MatchResult> ObserveAsync(ObservedTransfer transfer, CancellationToken cancellationToken = default) { Transfers.Add(transfer); return Task.FromResult(new MatchResult(PaymentMatchStatus.Unmatched)); }
-        public Task<MatchResult> ClaimByTxIdAsync(Guid orderId, string transactionHash, int? transferIndex = null, string? clientIp = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<MatchResult> ClaimByTxIdAsync(Guid orderId, string transactionHash, string? transferKey = null, string? clientIp = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<MatchResult> ReportPaymentAsync(Guid orderId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task RetryUnmatchedAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }

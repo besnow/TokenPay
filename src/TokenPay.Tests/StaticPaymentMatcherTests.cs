@@ -42,9 +42,9 @@ public class StaticPaymentMatcherTests : IDisposable
         var observed = await _matcher.ObserveAsync(Transfer(DateTime.UtcNow, "aaaaaaaaaaaaaaaa", 10m));
         Assert.Equal(PaymentMatchStatus.Ambiguous, observed.Status);
         Assert.Empty(await _db.Select<TokenOrders>().Where(x => x.Status == OrderStatus.Paid).ToListAsync());
-        var claimed = await _matcher.ClaimByTxIdAsync(first.Id, "aaaaaaaaaaaaaaaa", 7);
-        Assert.Equal(PaymentMatchStatus.ManualReview, claimed.Status);
-        Assert.Empty(await _db.Select<TokenOrders>().Where(x => x.Status == OrderStatus.Paid).ToListAsync());
+        var claimed = await _matcher.ClaimByTxIdAsync(first.Id, "aaaaaaaaaaaaaaaa", "event:7");
+        Assert.Equal(PaymentMatchStatus.Matched, claimed.Status);
+        Assert.Single(await _db.Select<TokenOrders>().Where(x => x.Status == OrderStatus.Paid).ToListAsync());
     }
 
     [Fact]
@@ -72,7 +72,7 @@ public class StaticPaymentMatcherTests : IDisposable
         var resolver = new FakeResolver(Transfer(DateTime.UtcNow, "dddddddddddddddd", 10m));
         var matcher = new StaticPaymentMatcher(_db, Options.Create(new StaticPaymentMatchOptions()), _channel,
             NullLogger<StaticPaymentMatcher>.Instance, new[] { resolver });
-        var result = await matcher.ClaimByTxIdAsync(order.Id, "dddddddddddddddd", 7);
+        var result = await matcher.ClaimByTxIdAsync(order.Id, "dddddddddddddddd", "event:7");
         Assert.True(resolver.Called);
         Assert.Equal(PaymentMatchStatus.Matched, result.Status);
         Assert.Single(await _db.Select<ChainPayment>().Where(x => x.TransactionHash == "dddddddddddddddd").ToListAsync());
@@ -99,6 +99,23 @@ public class StaticPaymentMatcherTests : IDisposable
         Assert.Equal(PaymentMatchStatus.Matched, repeated.Status);
         Assert.Equal(12m, (await _db.Select<TokenOrders>().Where(x => x.Id == paid.OrderId).FirstAsync()).PayAmount);
         Assert.Single(await _db.Select<ChainPayment>().Where(x => x.TransactionHash == "over").ToListAsync());
+    }
+
+    [Fact]
+    public async Task Txid_claim_uses_symmetric_locked_amount_limit()
+    {
+        var order = await AddOrder(DateTime.UtcNow.AddMinutes(-1));
+        await _matcher.ObserveAsync(Transfer(DateTime.UtcNow, "eeeeeeeeeeeeeeee", 12m));
+        // The automatic scanner accepts a unique overpayment. Use an ambiguous pair
+        // so the transfer remains available to exercise direct-claim limits.
+        Assert.Equal(OrderStatus.Paid, (await _db.Select<TokenOrders>().Where(x => x.Id == order.Id).FirstAsync()).Status);
+
+        var first = await AddOrder(DateTime.UtcNow.AddMinutes(-1));
+        await AddOrder(DateTime.UtcNow.AddMinutes(-1));
+        await _matcher.ObserveAsync(Transfer(DateTime.UtcNow, "ffffffffffffffff", 12m));
+        var result = await _matcher.ClaimByTxIdAsync(first.Id, "ffffffffffffffff", "event:7");
+        Assert.Equal(PaymentMatchStatus.ClaimRejected, result.Status);
+        Assert.Equal(OrderStatus.Pending, (await _db.Select<TokenOrders>().Where(x => x.Id == first.Id).FirstAsync()).Status);
     }
 
     [Fact]

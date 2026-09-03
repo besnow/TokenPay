@@ -16,6 +16,9 @@ namespace TokenPay.Models.TronModel
 
         [JsonProperty("page_size")]
         public int PageSize { get; set; }
+
+        [JsonProperty("fingerprint")]
+        public string? Fingerprint { get; set; }
     }
 
     public class BaseResponse<T>

@@ -36,6 +36,8 @@ namespace TokenPay.Models.EthModel
         /// Api Host
         /// </summary>
         public string ApiHost { get; set; }
+        /// <summary>JSON-RPC endpoint used for authoritative TxID receipt lookup.</summary>
+        public string? RpcHost { get; set; }
         /// <summary>
         /// Api Key
         /// </summary>
@@ -64,7 +66,7 @@ namespace TokenPay.Models.EthModel
         /// </summary>
         public string ContractAddress { get; set; }
         /// <summary>Token contract decimals.</summary>
-        public int Decimals { get; set; } = 18;
+        public int? Decimals { get; set; }
     }
 #pragma warning restore CS8618 // 在退出构造函数时，不可为 null 的字段必须包含非 null 值。请考虑声明为可以为 null。
 }

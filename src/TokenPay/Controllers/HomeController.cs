@@ -44,7 +44,7 @@ namespace TokenPay.Controllers
                 {
                     if (parts.Length == 3 && string.Equals(parts[2], chain.BaseCoin, StringComparison.Ordinal)) return chain.Decimals;
                     var token = chain.ERC20?.FirstOrDefault(x => parts.Contains(x.Name, StringComparer.Ordinal));
-                    if (token != null) return token.Decimals;
+                    if (token?.Decimals != null) return token.Decimals.Value;
                 }
             }
             throw new InvalidOperationException($"No configured decimals for enabled currency {currency}");
@@ -574,11 +574,11 @@ namespace TokenPay.Controllers
         [RequestSizeLimit(1024)]
         public async Task<IActionResult> SubmitTxId(Guid id, [FromBody] TxIdClaim model, CancellationToken cancellationToken)
         {
-            var result = await _staticMatcher.ClaimByTxIdAsync(id, model.TransactionHash, model.TransferIndex,
+            var result = await _staticMatcher.ClaimByTxIdAsync(id, model.TransactionHash, model.TransferKey,
                 HttpContext.Connection.RemoteIpAddress?.ToString(), cancellationToken);
             return Json(new { status = result.Status.ToString(), result.Reason });
         }
 
-        public sealed record TxIdClaim(string TransactionHash, int? TransferIndex);
+        public sealed record TxIdClaim(string TransactionHash, string? TransferKey);
     }
 }

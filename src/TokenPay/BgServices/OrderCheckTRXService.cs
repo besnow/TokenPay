@@ -53,7 +53,7 @@ namespace TokenPay.BgServices
             var OnlyConfirmed = _configuration.GetValue("OnlyConfirmed", true);
             foreach (var address in Address)
             {
-                var cursor = await cursors.GetAsync("TRON", "TRX", address,
+                var cursor = await cursors.GetAsync("TRON", "TRX", address, "TRX",
                     _configuration.GetValue("StaticPaymentMatch:LatePaymentRetentionHours", 24), stoppingToken);
                 //查询此地址待支付订单
                 var orders = await _repository
