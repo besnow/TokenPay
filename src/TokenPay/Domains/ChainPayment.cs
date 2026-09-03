@@ -2,7 +2,7 @@ using FreeSql.DataAnnotations;
 
 namespace TokenPay.Domains;
 
-[Index("uk_chain_payment", "Network,TransactionHash,TransferIndex", true)]
+[Index("uk_chain_payment_key", "Network,TransactionHash,TransferKey", true)]
 public class ChainPayment
 {
     public Guid Id { get; set; }
@@ -11,6 +11,7 @@ public class ChainPayment
     public string? TokenContract { get; set; }
     public required string TransactionHash { get; set; }
     public int TransferIndex { get; set; }
+    public required string TransferKey { get; set; }
     public string? FromAddress { get; set; }
     public required string ToAddress { get; set; }
     [Column(Precision = 38, Scale = 18)]

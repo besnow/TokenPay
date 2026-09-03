@@ -126,3 +126,5 @@ USDT-TRC20打赏地址: TKGTx4pCKiKQbk8evXHTborfZn754TGViP
 创建订单响应同时提供 `AutoPaymentExpireTime`（普通自动窗口）和 `LatePaymentRetentionTime`（异常到账、TxID 处理保留期）。升级后在静态部署中，程序仅迁移仍为 `Pending` 的旧订单，并以原始 `Amount` 初始化最低到账，不修改历史已支付或已过期订单。关闭 `StaticPaymentMatch.Enabled` 的静态部署会在启动时明确拒绝运行，避免静默停止回调。
 
 `StaticPaymentMatch` 配置：`Enabled` 控制该功能；`AutoWindowMinutes` 是普通窗口；`LatePaymentRetentionHours` 是延迟到账保留窗口；`MaxUnderpayUsd` 与 `MaxUnderpayPercent` 共同限制少付价值（取较小者）；`AcceptOverpay` 允许多付完成；`CreditOverpay` 必须保持 `false` 以免多付计入余额；`AmbiguousMatchAction` 默认 `RequireTxId`；`BlockTimeSkewSeconds` 仅容忍节点时间戳小幅偏差。多付部分不退回、不计入余额。
+
+EVM 扫描只接受链上 `to` 与配置地址一致（大小写不敏感）的成功、足够确认的转入；ERC20 还必须匹配配置合约和 decimals。原生、内部、Token 事件分别使用 `native`、`trace:<traceId>`、`log:<logIndex>` 作为稳定事件键。TRON/EVM 的每网络、资产和地址扫描进度持久化在 `ChainScanCursor`，首次启动回看完整静态保留期，后续从游标并保留重叠范围恢复。

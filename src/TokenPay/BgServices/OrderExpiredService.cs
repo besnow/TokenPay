@@ -1,5 +1,6 @@
 using FreeSql;
 using TokenPay.Domains;
+using TokenPay.Helper;
 
 namespace TokenPay.BgServices
 {
@@ -23,10 +24,11 @@ namespace TokenPay.BgServices
             var ExpireTime = _configuration.GetValue("ExpireTime", 10 * 60);
             var ExpireDateTime = DateTime.Now.AddSeconds(-1 * ExpireTime);
             var staticRetention = _configuration.GetValue("StaticPaymentMatch:LatePaymentRetentionHours", 24);
-            var staticExpireDateTime = DateTime.UtcNow.AddHours(-staticRetention);
             var ExpiredOrders = await _repository.Where(x => x.Status == OrderStatus.Pending)
-                .Where(x => (!x.IsStaticAddress && x.CreateTime < ExpireDateTime) || (x.IsStaticAddress && x.CreateTime < staticExpireDateTime))
                 .ToListAsync();
+            ExpiredOrders = ExpiredOrders.Where(x => !x.IsStaticAddress
+                ? x.CreateTime < ExpireDateTime
+                : PaymentTime.ToUtc(x.CreateTime).AddHours(staticRetention) < DateTime.UtcNow).ToList();
             foreach (var order in ExpiredOrders)
             {
                 _logger.LogInformation("订单[{c}]过期了！", order.Id);

@@ -17,6 +17,7 @@ namespace TokenPay.BgServices
         private readonly Channel<TokenOrders> _channel;
         private readonly IFreeSql freeSql;
         private readonly IStaticPaymentMatcher matcher;
+        private readonly ChainScanCursorStore cursors;
         private bool UseDynamicAddress => _configuration.GetValue("UseDynamicAddress", true);
         private bool UseDynamicAddressAmountMove => _configuration.GetValue("DynamicAddressConfig:AmountMove", false);
 
@@ -24,13 +25,14 @@ namespace TokenPay.BgServices
             IConfiguration configuration,
             IHostEnvironment env,
             Channel<TokenOrders> channel,
-            IFreeSql freeSql, IStaticPaymentMatcher matcher) : base("TRX订单检测", TimeSpan.FromSeconds(3), logger)
+            IFreeSql freeSql, IStaticPaymentMatcher matcher, ChainScanCursorStore cursors) : base("TRX订单检测", TimeSpan.FromSeconds(3), logger)
         {
             this._configuration = configuration;
             this._env = env;
             this._channel = channel;
             this.freeSql = freeSql;
             this.matcher = matcher;
+            this.cursors = cursors;
         }
 
         protected override async Task ExecuteAsync(DateTime RunTime, CancellationToken stoppingToken)
@@ -49,9 +51,10 @@ namespace TokenPay.BgServices
                 BaseUrl = "https://api.shasta.trongrid.io";
             }
             var OnlyConfirmed = _configuration.GetValue("OnlyConfirmed", true);
-            var start = DateTime.Now.AddMinutes(-10);
             foreach (var address in Address)
             {
+                var cursor = await cursors.GetAsync("TRON", "TRX", address,
+                    _configuration.GetValue("StaticPaymentMatch:LatePaymentRetentionHours", 24), stoppingToken);
                 //查询此地址待支付订单
                 var orders = await _repository
                     .Where(x => x.Status == OrderStatus.Pending)
@@ -70,7 +73,7 @@ namespace TokenPay.BgServices
                 }
                 query.Add("only_to", true);
                 query.Add("limit", 50);
-                query.Add("min_timestamp", start.ToUnixTimeStamp());
+                query.Add("min_timestamp", cursor.LastBlockTimeUtc.AddMinutes(-2).ToUnixTimeStamp());
                 var req = BaseUrl
                     .AppendPathSegment($"v1/accounts/{address}/transactions")
                     .SetQueryParams(query)
@@ -93,7 +96,7 @@ namespace TokenPay.BgServices
                         if (raw == null || raw.AssetName != null) continue;
                         if (!UseDynamicAddress)
                         {
-                            await matcher.ObserveAsync(new("TRON", "TRX", null, item.TxID, 0,
+                            await matcher.ObserveAsync(new("TRON", "TRX", null, item.TxID, "native",
                                 raw.OwnerAddress.HexToeBase58(), raw.ToAddressBase58, raw.RealAmount, 0,
                                 item.BlockTimestamp.ToDateTime(), OnlyConfirmed ? 1 : 0), stoppingToken);
                             continue;
@@ -147,6 +150,8 @@ namespace TokenPay.BgServices
                             }
                         }
                     }
+                    var newest = result.Data.Max(x => x.BlockTimestamp).ToDateTime();
+                    await cursors.AdvanceAsync(cursor, 0, newest, null, stoppingToken);
                 }
             }
         }

@@ -59,6 +59,7 @@ else
             </div>
             @if (Model.IsStaticAddress)
             {
+                @Html.AntiForgeryToken()
                 <div class="mb-2">最低可接受到账：<span class="text-danger">@Model.MinimumPaidAmount @Model.Currency.ToCurrency(chain)</span></div>
                 <div class="mb-2">当前状态：<span id="payment-status" class="text-danger">等待支付</span></div>
                 <div class="alert alert-warning py-2">多付部分不退回、不计入余额。</div>
@@ -119,15 +120,25 @@ else
         })
         $("#paid-button").on("click", function () {
             const button = $(this).prop("disabled", true).text("正在检查到账……");
-            $.post("/payment/@Model.Id/recheck").always(() => {
+            $.ajax({ url: "/payment/@Model.Id/recheck", method: "POST",
+                headers: { "RequestVerificationToken": $('input[name="__RequestVerificationToken"]').val() }
+            }).done(x => { renderStatus(x.status, x.reason); }).always(() => {
                 Check(); button.prop("disabled", false).text("我已支付");
-                if ($("#payment-status").text() !== "支付成功") $("#txid-box").removeClass("d-none");
             });
         });
         $("#txid-submit").on("click", function () {
             $.ajax({ url: "/payment/@Model.Id/txid", method: "POST", contentType: "application/json",
-                data: JSON.stringify({ transactionHash: $("#txid").val() }) }).then(Check);
+                headers: { "RequestVerificationToken": $('input[name="__RequestVerificationToken"]').val() },
+                data: JSON.stringify({ transactionHash: $("#txid").val() }) }).then(x => renderStatus(x.status, x.reason));
         });
+        function renderStatus(status, reason) {
+            const labels = { Waiting: '等待链上到账', Pending: '等待链上到账', Unmatched: '未发现交易',
+                Matched: '支付成功', Paid: '支付成功', Ambiguous: '存在多个候选，请提供TxID',
+                AmountInsufficient: '到账金额不足', TxIdSubmitted: 'TxID已提交，等待人工审核',
+                ManualReview: 'TxID已提交，等待人工审核', Expired: '订单已过期' };
+            $('#payment-status').text(labels[status] || reason || '正在等待确认');
+            if (status === 'Ambiguous' || status === 'ManualReview' || status === 'TxIdSubmitted') $('#txid-box').removeClass('d-none');
+        }
         function Check() {
             var RedirectUrl = "@(Model?.RedirectUrl)";
                 $.get("/Check/@(Model?.Id)")

@@ -63,6 +63,8 @@ namespace TokenPay.Models.EthModel
         /// 合约地址
         /// </summary>
         public string ContractAddress { get; set; }
+        /// <summary>Token contract decimals.</summary>
+        public int Decimals { get; set; } = 18;
     }
 #pragma warning restore CS8618 // 在退出构造函数时，不可为 null 的字段必须包含非 null 值。请考虑声明为可以为 null。
 }

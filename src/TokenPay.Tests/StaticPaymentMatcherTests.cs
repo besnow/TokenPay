@@ -20,6 +20,7 @@ public class StaticPaymentMatcherTests : IDisposable
         _db = new FreeSqlBuilder().UseConnectionString(DataType.Sqlite, $"Data Source={_file}").UseAutoSyncStructure(true).Build();
         _db.CodeFirst.SyncStructure<TokenOrders>();
         _db.CodeFirst.SyncStructure<ChainPayment>();
+        _db.CodeFirst.SyncStructure<PaymentClaim>();
         _matcher = new(_db, Options.Create(new StaticPaymentMatchOptions()), _channel, NullLogger<StaticPaymentMatcher>.Instance);
     }
 
@@ -65,6 +66,19 @@ public class StaticPaymentMatcherTests : IDisposable
     }
 
     [Fact]
+    public async Task Txid_resolves_chain_when_payment_is_not_local()
+    {
+        var order = await AddOrder(DateTime.UtcNow.AddMinutes(-2));
+        var resolver = new FakeResolver(Transfer(DateTime.UtcNow, "dddddddddddddddd", 10m));
+        var matcher = new StaticPaymentMatcher(_db, Options.Create(new StaticPaymentMatchOptions()), _channel,
+            NullLogger<StaticPaymentMatcher>.Instance, new[] { resolver });
+        var result = await matcher.ClaimByTxIdAsync(order.Id, "dddddddddddddddd", 7);
+        Assert.True(resolver.Called);
+        Assert.Equal(PaymentMatchStatus.Matched, result.Status);
+        Assert.Single(await _db.Select<ChainPayment>().Where(x => x.TransactionHash == "dddddddddddddddd").ToListAsync());
+    }
+
+    [Fact]
     public async Task Transfer_before_order_and_transfer_after_retention_do_not_match()
     {
         await AddOrder(DateTime.UtcNow);
@@ -91,8 +105,8 @@ public class StaticPaymentMatcherTests : IDisposable
     public async Task Transfer_index_makes_events_in_one_transaction_unique()
     {
         await AddOrder(DateTime.UtcNow.AddMinutes(-1));
-        await _matcher.ObserveAsync(Transfer(DateTime.UtcNow, "multi", 8m) with { TransferIndex = 1 });
-        await _matcher.ObserveAsync(Transfer(DateTime.UtcNow, "multi", 10m) with { TransferIndex = 2 });
+        await _matcher.ObserveAsync(Transfer(DateTime.UtcNow, "multi", 8m) with { TransferKey = "event:1" });
+        await _matcher.ObserveAsync(Transfer(DateTime.UtcNow, "multi", 10m) with { TransferKey = "event:2" });
         Assert.Equal(2, (await _db.Select<ChainPayment>().Where(x => x.TransactionHash == "multi").ToListAsync()).Count);
     }
 
@@ -101,6 +115,17 @@ public class StaticPaymentMatcherTests : IDisposable
         var order = new TokenOrders { OutOrderId = Guid.NewGuid().ToString(), OrderUserKey = "u", Currency = "USDT_TRC20", ToAddress = "TStatic", Status = OrderStatus.Pending, IsStaticAddress = true, Amount = 10m, ActualAmount = 10m, LockedCoinPrice = 1m, OrderValueUsdt = 10m, AllowedUnderpayAmount = 1m, MinimumPaidAmount = 9m, CreateTime = created };
         await _db.Insert(order).ExecuteAffrowsAsync(); return order;
     }
-    private static ObservedTransfer Transfer(DateTime time, string hash, decimal amount) => new("TRON", "USDT_TRC20", "contract", hash, 7, "from", "TStatic", amount, 1, time, 20);
+    private static ObservedTransfer Transfer(DateTime time, string hash, decimal amount) => new("TRON", "USDT_TRC20", "contract", hash, "event:7", "from", "TStatic", amount, 1, time, 20);
     public void Dispose() { _db.Dispose(); if (File.Exists(_file)) File.Delete(_file); }
+
+    private sealed class FakeResolver(ObservedTransfer transfer) : IChainTransactionResolver
+    {
+        public bool Called { get; private set; }
+        public bool CanResolve(TokenOrders order) => true;
+        public Task<IReadOnlyList<ObservedTransfer>> ResolveAsync(TokenOrders order, string transactionHash, CancellationToken cancellationToken)
+        {
+            Called = true;
+            return Task.FromResult<IReadOnlyList<ObservedTransfer>>(new[] { transfer });
+        }
+    }
 }

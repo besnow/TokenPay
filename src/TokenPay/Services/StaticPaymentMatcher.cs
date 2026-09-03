@@ -9,7 +9,7 @@ namespace TokenPay.Services;
 
 public sealed record ObservedTransfer(
     string Network, string Asset, string? TokenContract, string TransactionHash,
-    int TransferIndex, string? FromAddress, string ToAddress, decimal Amount,
+    string TransferKey, string? FromAddress, string ToAddress, decimal Amount,
     long BlockNumber, DateTime BlockTimeUtc, int Confirmations);
 
 public sealed record MatchResult(PaymentMatchStatus Status, Guid? OrderId = null, string? Reason = null);
@@ -17,7 +17,7 @@ public sealed record MatchResult(PaymentMatchStatus Status, Guid? OrderId = null
 public interface IStaticPaymentMatcher
 {
     Task<MatchResult> ObserveAsync(ObservedTransfer transfer, CancellationToken cancellationToken = default);
-    Task<MatchResult> ClaimByTxIdAsync(Guid orderId, string transactionHash, int? transferIndex = null, CancellationToken cancellationToken = default);
+    Task<MatchResult> ClaimByTxIdAsync(Guid orderId, string transactionHash, int? transferIndex = null, string? clientIp = null, CancellationToken cancellationToken = default);
     Task<MatchResult> ReportPaymentAsync(Guid orderId, CancellationToken cancellationToken = default);
     Task RetryUnmatchedAsync(CancellationToken cancellationToken = default);
 }
@@ -29,15 +29,22 @@ public sealed class StaticPaymentMatcher : IStaticPaymentMatcher
     private readonly StaticPaymentMatchOptions _options;
     private readonly Channel<TokenOrders> _paidOrders;
     private readonly ILogger<StaticPaymentMatcher> _logger;
+    private readonly IReadOnlyList<IChainTransactionResolver> _resolvers;
 
     public StaticPaymentMatcher(IFreeSql db, IOptions<StaticPaymentMatchOptions> options,
-        Channel<TokenOrders> paidOrders, ILogger<StaticPaymentMatcher> logger)
+        Channel<TokenOrders> paidOrders, ILogger<StaticPaymentMatcher> logger,
+        IEnumerable<IChainTransactionResolver> resolvers)
     {
         _db = db;
         _options = options.Value;
         _paidOrders = paidOrders;
         _logger = logger;
+        _resolvers = resolvers.ToArray();
     }
+
+    public StaticPaymentMatcher(IFreeSql db, IOptions<StaticPaymentMatchOptions> options,
+        Channel<TokenOrders> paidOrders, ILogger<StaticPaymentMatcher> logger)
+        : this(db, options, paidOrders, logger, Array.Empty<IChainTransactionResolver>()) { }
 
     public async Task<MatchResult> ObserveAsync(ObservedTransfer transfer, CancellationToken cancellationToken = default)
     {
@@ -45,7 +52,8 @@ public sealed class StaticPaymentMatcher : IStaticPaymentMatcher
         var payment = new ChainPayment
         {
             Network = transfer.Network, Asset = transfer.Asset, TokenContract = transfer.TokenContract,
-            TransactionHash = transfer.TransactionHash, TransferIndex = transfer.TransferIndex,
+            TransactionHash = transfer.TransactionHash, TransferKey = transfer.TransferKey,
+            TransferIndex = int.TryParse(transfer.TransferKey.Split(':').Last(), out var legacyIndex) ? legacyIndex : 0,
             FromAddress = transfer.FromAddress, ToAddress = transfer.ToAddress, ActualAmount = transfer.Amount,
             BlockNumber = transfer.BlockNumber, BlockTime = EnsureUtc(transfer.BlockTimeUtc),
             Confirmations = transfer.Confirmations, MatchStatus = PaymentMatchStatus.Unmatched
@@ -53,22 +61,50 @@ public sealed class StaticPaymentMatcher : IStaticPaymentMatcher
         try { await _db.Insert(payment).ExecuteAffrowsAsync(cancellationToken); }
         catch (Exception ex) when (IsUniqueConstraintViolation(ex))
         {
-            payment = await _db.Select<ChainPayment>().Where(x => x.Network == transfer.Network && x.TransactionHash == transfer.TransactionHash && x.TransferIndex == transfer.TransferIndex).FirstAsync(cancellationToken);
+            payment = await _db.Select<ChainPayment>().Where(x => x.Network == transfer.Network && x.TransactionHash == transfer.TransactionHash && x.TransferKey == transfer.TransferKey).FirstAsync(cancellationToken);
         }
         return await MatchExistingAsync(payment, null, PaymentMatchMethod.TimeUnique, cancellationToken);
     }
 
-    public async Task<MatchResult> ClaimByTxIdAsync(Guid orderId, string transactionHash, int? transferIndex = null, CancellationToken cancellationToken = default)
+    public async Task<MatchResult> ClaimByTxIdAsync(Guid orderId, string transactionHash, int? transferIndex = null, string? clientIp = null, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(transactionHash) || transactionHash.Length is < 16 or > 128 || !transactionHash.All(c => char.IsAsciiLetterOrDigit(c) || c is 'x' or 'X'))
             return new(PaymentMatchStatus.Unmatched, Reason: "invalid transaction hash");
         var order = await _db.Select<TokenOrders>().Where(x => x.Id == orderId && x.IsStaticAddress).FirstAsync(cancellationToken);
         if (order == null) return new(PaymentMatchStatus.Unmatched, Reason: "order not found");
-        var transfers = await _db.Select<ChainPayment>().Where(x => x.TransactionHash == transactionHash && x.Asset == order.Currency)
+        var expectedNetwork = order.Currency.StartsWith("EVM_", StringComparison.Ordinal)
+            ? order.Currency.Split('_')[1] : "TRON";
+        var transfers = await _db.Select<ChainPayment>().Where(x => x.Network == expectedNetwork && x.TransactionHash == transactionHash && x.Asset == order.Currency)
             .WhereIf(transferIndex.HasValue, x => x.TransferIndex == transferIndex).ToListAsync(cancellationToken);
-        if (transfers.Count == 0) return new(PaymentMatchStatus.Unmatched, Reason: "交易尚未由已确认的链上扫描发现");
+        if (transfers.Count == 0)
+        {
+            var resolver = _resolvers.SingleOrDefault(x => x.CanResolve(order));
+            if (resolver == null) return new(PaymentMatchStatus.Unmatched, Reason: "no chain resolver configured for asset");
+            var resolved = await resolver.ResolveAsync(order, transactionHash, cancellationToken);
+            foreach (var observed in resolved.Where(x =>
+                         x.Network == expectedNetwork && x.Asset == order.Currency
+                         && string.Equals(x.ToAddress, order.ToAddress, StringComparison.OrdinalIgnoreCase)))
+                await ObserveAsync(observed, cancellationToken);
+            transfers = await _db.Select<ChainPayment>().Where(x => x.Network == expectedNetwork && x.TransactionHash == transactionHash && x.Asset == order.Currency)
+                .WhereIf(transferIndex.HasValue, x => x.TransferIndex == transferIndex).ToListAsync(cancellationToken);
+        }
+        if (transfers.Count == 0) return new(PaymentMatchStatus.Unmatched, Reason: "链上查询未发现符合网络、币种和收款地址的成功到账");
         if (transfers.Count > 1 && !transferIndex.HasValue) return new(PaymentMatchStatus.Ambiguous, Reason: "该交易包含多笔转账，请指定日志序号");
-        return await MatchExistingAsync(transfers.Single(), orderId, PaymentMatchMethod.TxIdClaim, cancellationToken);
+        var payment = transfers.Single();
+        try
+        {
+            await _db.Insert(new PaymentClaim { OrderId = orderId, ChainPaymentId = payment.Id, Network = expectedNetwork,
+                TransactionHash = transactionHash, ClientIp = clientIp, ReviewStatus = PaymentClaimReviewStatus.Submitted })
+                .ExecuteAffrowsAsync(cancellationToken);
+        }
+        catch (Exception ex) when (IsUniqueConstraintViolation(ex)) { }
+        var result = await MatchExistingAsync(payment, orderId, PaymentMatchMethod.TxIdClaim, cancellationToken);
+        await _db.Update<PaymentClaim>()
+            .Set(x => x.ReviewStatus, result.Status == PaymentMatchStatus.Matched ? PaymentClaimReviewStatus.AutoMatched : PaymentClaimReviewStatus.ManualReview)
+            .Set(x => x.ReviewReason, result.Reason)
+            .Where(x => x.OrderId == orderId && x.Network == expectedNetwork && x.TransactionHash == transactionHash)
+            .ExecuteAffrowsAsync(cancellationToken);
+        return result;
     }
 
     public async Task<MatchResult> ReportPaymentAsync(Guid orderId, CancellationToken cancellationToken = default)
@@ -103,7 +139,10 @@ public sealed class StaticPaymentMatcher : IStaticPaymentMatcher
 
     private async Task<MatchResult> MatchExistingAsync(ChainPayment payment, Guid? claimedOrderId, PaymentMatchMethod method, CancellationToken ct)
     {
-        if (payment.MatchStatus == PaymentMatchStatus.Matched) return new(payment.MatchStatus, payment.MatchedOrderId);
+        if (payment.MatchStatus == PaymentMatchStatus.Matched)
+            return claimedOrderId.HasValue && payment.MatchedOrderId != claimedOrderId
+                ? new(PaymentMatchStatus.ManualReview, Reason: "transaction already belongs to another order")
+                : new(payment.MatchStatus, payment.MatchedOrderId);
         var blockTime = EnsureUtc(payment.BlockTime);
         var earliest = blockTime.AddHours(-_options.LatePaymentRetentionHours);
         var latestCreation = blockTime.AddSeconds(_options.BlockTimeSkewSeconds);

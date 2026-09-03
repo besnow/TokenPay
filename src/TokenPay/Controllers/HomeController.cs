@@ -14,6 +14,7 @@ using TokenPay.Models.EthModel;
 using TokenPay.Models;
 using TokenPay.Services;
 using Microsoft.Extensions.Options;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace TokenPay.Controllers
 {
@@ -31,17 +32,22 @@ namespace TokenPay.Controllers
         private readonly IStaticPaymentMatcher _staticMatcher;
         private readonly StaticPaymentMatchOptions _staticOptions;
         private FiatCurrency BaseCurrency => Enum.Parse<FiatCurrency>(_configuration.GetValue("BaseCurrency", "CNY")!);
-        public static int GetDecimals(string currency, IConfiguration _configuration)
+        public static int GetDecimals(string currency, IConfiguration configuration, IReadOnlyList<EVMChain>? chains = null)
         {
-            var decimals = currency switch
+            if (currency == "TRX") return configuration.GetValue("Decimals:TRX", 6);
+            if (currency == "USDT_TRC20") return 6;
+            if (currency.StartsWith("EVM_", StringComparison.Ordinal) && chains != null)
             {
-                "TRX" => _configuration.GetValue("Decimals:TRX", 2),
-                _ when currency.StartsWith("EVM_") && currency.Split('_').Last() == "ETH" => _configuration.GetValue("Decimals:ETH", 8),
-                _ when currency.Contains("USDT", StringComparison.OrdinalIgnoreCase) => _configuration.GetValue("Decimals:USDT", 6),
-                _ => _configuration.GetValue($"Decimals:{currency}", 4)
-            };
-
-            return decimals;
+                var parts = currency.Split('_');
+                var chain = chains.FirstOrDefault(x => string.Equals(x.ChainNameEN, parts.ElementAtOrDefault(1), StringComparison.Ordinal));
+                if (chain != null)
+                {
+                    if (parts.Length == 3 && string.Equals(parts[2], chain.BaseCoin, StringComparison.Ordinal)) return chain.Decimals;
+                    var token = chain.ERC20?.FirstOrDefault(x => parts.Contains(x.Name, StringComparer.Ordinal));
+                    if (token != null) return token.Decimals;
+                }
+            }
+            throw new InvalidOperationException($"No configured decimals for enabled currency {currency}");
         }
         private List<string> GetErc20Name()
         {
@@ -123,7 +129,7 @@ namespace TokenPay.Controllers
             ViewData["QrCode"] = Convert.ToBase64String(CreateQrCode(order.ToAddress));
             var ExpireTime = _configuration.GetValue("ExpireTime", 10 * 60);
             var effectiveExpire = order.IsStaticAddress
-                ? order.CreateTime.AddHours(_staticOptions.LatePaymentRetentionHours)
+                ? PaymentTime.ToUtc(order.CreateTime).AddHours(_staticOptions.LatePaymentRetentionHours)
                 : order.CreateTime.AddSeconds(ExpireTime);
             if (DateTime.UtcNow > effectiveExpire || order.Status == OrderStatus.Expired)
             {
@@ -298,7 +304,7 @@ namespace TokenPay.Controllers
                     order.OrderValueUsdt = model.ActualAmount / usdtRate;
                     var coinPriceUsdt = Rate / usdtRate;
                     (order.AllowedUnderpayAmount, order.MinimumPaidAmount) = PaymentAmountCalculator.Calculate(
-                        Amount, order.OrderValueUsdt, coinPriceUsdt, _staticOptions, GetDecimals(model.Currency, _configuration));
+                        Amount, order.OrderValueUsdt, coinPriceUsdt, _staticOptions, GetDecimals(model.Currency, _configuration, _chains));
                 }
             }
             catch (TokenPayException e)
@@ -329,6 +335,9 @@ namespace TokenPay.Controllers
         {
             var BaseCurrency = _configuration.GetValue<string>("BaseCurrency", "CNY");
             var ExpireTime = _configuration.GetValue("ExpireTime", 10 * 60);
+            var created = order.IsStaticAddress ? PaymentTime.ToUtc(order.CreateTime) : order.CreateTime;
+            var autoExpire = order.IsStaticAddress ? created.AddMinutes(_staticOptions.AutoWindowMinutes) : created.AddSeconds(ExpireTime);
+            var lateExpire = order.IsStaticAddress ? created.AddHours(_staticOptions.LatePaymentRetentionHours) : autoExpire;
             var dic = new SortedDictionary<string, object?>
             {
                 { nameof(order.Id), order.Id.ToString() },
@@ -341,9 +350,9 @@ namespace TokenPay.Controllers
                 { "BaseCurrency", BaseCurrency },
                 { "BlockChainName", order.Currency.ToBlockchainEnglishName(_chains) },
                 { "CurrencyName", order.Currency.ToCurrency(_chains) },
-                { "ExpireTime", order.CreateTime.AddSeconds(ExpireTime).ToString("yyyy-MM-dd HH:mm:ss")},
-                { "AutoPaymentExpireTime", order.CreateTime.AddMinutes(_staticOptions.AutoWindowMinutes).ToString("yyyy-MM-dd HH:mm:ss")},
-                { "LatePaymentRetentionTime", order.CreateTime.AddHours(_staticOptions.LatePaymentRetentionHours).ToString("yyyy-MM-dd HH:mm:ss")},
+                { "ExpireTime", autoExpire.ToString("O")},
+                { "AutoPaymentExpireTime", autoExpire.ToString("O")},
+                { "LatePaymentRetentionTime", lateExpire.ToString("O")},
                 { "QrCodeBase64", "data:image/png;base64," + Convert.ToBase64String(CreateQrCode(order.ToAddress))},
                 { "QrCodeLink", Host + Url.Action(nameof(GetQrCode), new { Id = order.Id })},
             };
@@ -483,7 +492,7 @@ namespace TokenPay.Controllers
             {
                 throw new TokenPayException("汇率有误！");
             }
-            var Amount = (model.ActualAmount / rate).ToRound(GetDecimals(model.Currency, _configuration));
+            var Amount = (model.ActualAmount / rate).ToRound(GetDecimals(model.Currency, _configuration, _chains));
             // Static matching is based on address/network/time uniqueness, never an amount fingerprint.
             var UseTokenAdress = CurrentAdress[Random.Shared.Next(CurrentAdress.Length)];
             return (UseTokenAdress, Amount, rate);
@@ -546,18 +555,27 @@ namespace TokenPay.Controllers
 
         [HttpPost]
         [Route("/payment/{id:guid}/recheck")]
+        [ValidateAntiForgeryToken]
+        [EnableRateLimiting("payment-write")]
+        [RequestSizeLimit(1024)]
         public async Task<IActionResult> Recheck(Guid id, CancellationToken cancellationToken)
         {
             await _staticMatcher.ReportPaymentAsync(id, cancellationToken);
             var order = await _repository.Where(x => x.Id == id).FirstAsync();
-            return Json(new { status = order?.Status.ToString() ?? "NotFound" });
+            return Json(new { status = order == null ? "NotFound" :
+                order.Status == OrderStatus.Pending ? order.PaymentMatchStatus.ToString() : order.Status.ToString(),
+                reason = order?.PaymentMatchReason });
         }
 
         [HttpPost]
         [Route("/payment/{id:guid}/txid")]
+        [ValidateAntiForgeryToken]
+        [EnableRateLimiting("payment-write")]
+        [RequestSizeLimit(1024)]
         public async Task<IActionResult> SubmitTxId(Guid id, [FromBody] TxIdClaim model, CancellationToken cancellationToken)
         {
-            var result = await _staticMatcher.ClaimByTxIdAsync(id, model.TransactionHash, model.TransferIndex, cancellationToken);
+            var result = await _staticMatcher.ClaimByTxIdAsync(id, model.TransactionHash, model.TransferIndex,
+                HttpContext.Connection.RemoteIpAddress?.ToString(), cancellationToken);
             return Json(new { status = result.Status.ToString(), result.Reason });
         }
 

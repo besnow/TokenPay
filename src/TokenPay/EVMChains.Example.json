@@ -13,10 +13,12 @@
       "ERC20": [
         {
           "Name": "USDT",
+          "Decimals": 6,
           "ContractAddress": "0xdAC17F958D2ee523a2206206994597C13D831ec7"
         },
         {
           "Name": "USDC",
+          "Decimals": 6,
           "ContractAddress": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
         }
       ]
@@ -34,10 +36,12 @@
       "ERC20": [
         {
           "Name": "USDT",
+          "Decimals": 6,
           "ContractAddress": "0x55d398326f99059ff775485246999027b3197955"
         },
         {
           "Name": "USDC",
+          "Decimals": 6,
           "ContractAddress": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d"
         }
       ]
@@ -55,10 +59,12 @@
       "ERC20": [
         {
           "Name": "USDT",
+          "Decimals": 6,
           "ContractAddress": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
         },
         {
           "Name": "USDC",
+          "Decimals": 6,
           "ContractAddress": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
         }
       ]

@@ -16,7 +16,7 @@ public static class PaymentAmountCalculator
         return (allowedCoin, Math.Max(0, expectedAmount - allowedCoin));
     }
 
-    private static decimal DecimalPower(int decimals)
+    public static decimal DecimalPower(int decimals)
     {
         decimal value = 1;
         for (var i = 0; i < Math.Clamp(decimals, 0, 18); i++) value *= 10;

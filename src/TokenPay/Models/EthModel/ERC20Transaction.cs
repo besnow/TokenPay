@@ -33,7 +33,7 @@ namespace TokenPay.Models.EthModel
 
         [JsonProperty("value")]
         public decimal Value { get; set; }
-        public decimal RealAmount => Value / (decimal)Math.Pow(10, TokenDecimal);
+        public decimal RealAmount => Value / TokenPay.Helper.PaymentAmountCalculator.DecimalPower(TokenDecimal);
 
         [JsonProperty("tokenName")]
         public string TokenName { get; set; }
@@ -67,6 +67,12 @@ namespace TokenPay.Models.EthModel
 
         [JsonProperty("confirmations")]
         public decimal Confirmations { get; set; }
+
+        [JsonProperty("isError")]
+        public int IsError { get; set; }
+
+        [JsonProperty("txreceipt_status")]
+        public int TxreceiptStatus { get; set; } = 1;
     }
 #pragma warning restore CS8618 // 在退出构造函数时，不可为 null 的字段必须包含非 null 值。请考虑声明为可以为 null。
 }

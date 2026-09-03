@@ -13,6 +13,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Channels;
+using System.Threading.RateLimiting;
 using TokenPay.BgServices;
 using TokenPay.Controllers;
 using TokenPay.Domains;
@@ -62,6 +63,16 @@ Services.AddSingleton(EVMChains);
 var UseDynamicAddress = Configuration.GetValue("UseDynamicAddress", true);
 if (!UseDynamicAddress && !Configuration.GetValue("StaticPaymentMatch:Enabled", true))
     throw new InvalidOperationException("UseDynamicAddress=false requires StaticPaymentMatch.Enabled=true; refusing to silently disable static payments.");
+if (!UseDynamicAddress && (!Configuration.GetValue("StaticPaymentMatch:AcceptOverpay", true)
+    || Configuration.GetValue("StaticPaymentMatch:CreditOverpay", false)
+    || !string.Equals(Configuration.GetValue("StaticPaymentMatch:AmbiguousMatchAction", "RequireTxId"), "RequireTxId", StringComparison.Ordinal)))
+    throw new InvalidOperationException("Static payments require AcceptOverpay=true, CreditOverpay=false and AmbiguousMatchAction=RequireTxId.");
+foreach (var chain in EVMChains.Where(x => x.Enable))
+{
+    if (chain.Decimals is < 0 or > 18) throw new InvalidOperationException($"Invalid decimals for {chain.ChainNameEN}/{chain.BaseCoin}");
+    foreach (var token in chain.ERC20 ?? [])
+        if (token.Decimals is < 0 or > 18) throw new InvalidOperationException($"Invalid decimals for {chain.ChainNameEN}/{token.Name}");
+}
 var UseDynamicAddressAmountMove = Configuration.GetValue("DynamicAddressConfig:AmountMove", false);
 var CollectionEnable = Configuration.GetValue("Collection:Enable", false);
 Log.Information("-------------{value}-------------", "AppSettings");
@@ -70,7 +81,7 @@ Log.Information("支持的币种: {value}", currencies);
 Log.Information("币种小数点位数: ");
 foreach (var currency in currencies)
 {
-    Log.Information("\t{currency}={value}", currency, HomeController.GetDecimals(currency, Configuration));
+    Log.Information("\t{currency}={value}", currency, HomeController.GetDecimals(currency, Configuration, EVMChains));
 }
 Log.Information("启用动态地址: {value}", UseDynamicAddress);
 Log.Information("启用动态金额: {value}", UseDynamicAddressAmountMove);
@@ -124,6 +135,7 @@ Services.AddScoped<UnitOfWorkManager>();
 Services.AddFreeRepository();
 Services.Configure<StaticPaymentMatchOptions>(Configuration.GetSection(StaticPaymentMatchOptions.SectionName));
 Services.AddSingleton<IStaticPaymentMatcher, StaticPaymentMatcher>();
+Services.AddSingleton<ChainScanCursorStore>();
 Services.AddHostedService<OrderExpiredService>();
 Services.AddHostedService<StaticPaymentRetryService>();
 Services.AddHostedService<UpdateRateService>();
@@ -135,6 +147,10 @@ Services.AddHostedService<OrderCheckEVMBaseService>();
 Services.AddHostedService<OrderCheckEVMERC20Service>();
 Services.AddHostedService<CollectionTRONService>();
 Services.AddHttpContextAccessor();
+Services.AddRateLimiter(options => options.AddPolicy("payment-write", context =>
+    RateLimitPartition.GetFixedWindowLimiter(
+        $"{context.Connection.RemoteIpAddress}:{context.Request.RouteValues["id"]}",
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = 5, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 })));
 Services.AddEndpointsApiExplorer();
 Services.AddSwaggerGen(c =>
 {
@@ -196,6 +212,7 @@ else
 }
 app.UseStaticFiles();
 app.UseRouting();
+app.UseRateLimiter();
 
 app.UseAuthorization();
 app.UseRequestLocalization();

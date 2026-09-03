@@ -19,6 +19,7 @@ namespace TokenPay.BgServices
         private readonly Channel<TokenOrders> _channel;
         private readonly IFreeSql freeSql;
         private readonly IStaticPaymentMatcher matcher;
+        private readonly ChainScanCursorStore cursors;
         private bool UseDynamicAddress => _configuration.GetValue("UseDynamicAddress", true);
         private bool UseDynamicAddressAmountMove => _configuration.GetValue("DynamicAddressConfig:AmountMove", false);
         public OrderCheckEVMERC20Service(ILogger<OrderCheckEVMERC20Service> logger,
@@ -26,7 +27,7 @@ namespace TokenPay.BgServices
             IHostEnvironment env,
             List<EVMChain> Chains,
             Channel<TokenOrders> channel,
-            IFreeSql freeSql, IStaticPaymentMatcher matcher) : base("EVM代币订单检测", TimeSpan.FromSeconds(15), logger)
+            IFreeSql freeSql, IStaticPaymentMatcher matcher, ChainScanCursorStore cursors) : base("EVM代币订单检测", TimeSpan.FromSeconds(15), logger)
         {
             this._configuration = configuration;
             this._env = env;
@@ -34,6 +35,7 @@ namespace TokenPay.BgServices
             this._channel = channel;
             this.freeSql = freeSql;
             this.matcher = matcher;
+            this.cursors = cursors;
         }
 
         protected override async Task ExecuteAsync(DateTime RunTime, CancellationToken stoppingToken)
@@ -74,6 +76,8 @@ namespace TokenPay.BgServices
 
             foreach (var address in Address)
             {
+                var cursor = await cursors.GetAsync(chain.ChainNameEN, Currency, address,
+                    _configuration.GetValue("StaticPaymentMatch:LatePaymentRetentionHours", 24), CancellationToken.None);
                 //查询此地址待支付订单
                 var orders = await _repository
                     .Where(x => x.Status == OrderStatus.Pending)
@@ -96,6 +100,7 @@ namespace TokenPay.BgServices
                     { "offset", 100 },
                     { "sort", "desc" }
                 };
+                if (cursor.LastBlockNumber > 0) query.Add("startblock", Math.Max(0, cursor.LastBlockNumber - 12));
                 if (_env.IsProduction())
                     query.Add("apikey", chain.ApiKey);
 
@@ -116,12 +121,12 @@ namespace TokenPay.BgServices
                             break;
                         }
                         if (!string.Equals(item.ContractAddress, erc20.ContractAddress, StringComparison.OrdinalIgnoreCase)
-                            || item.Confirmations < chain.Confirmations) continue;
+                            || !string.Equals(item.To, address, StringComparison.OrdinalIgnoreCase)
+                            || item.IsError != 0 || item.TxreceiptStatus == 0
+                            || item.Confirmations < chain.Confirmations || item.TokenDecimal != erc20.Decimals) continue;
                         if (!UseDynamicAddress)
                         {
-                            await matcher.ObserveAsync(new(chain.ChainNameEN, Currency, erc20.ContractAddress, item.Hash,
-                                item.LogIndex, item.From, address, item.RealAmount,
-                                long.TryParse(item.BlockNumber, out var bn) ? bn : 0, item.DateTime, (int)item.Confirmations));
+                            await EvmTransferGuard.ObserveTokenAsync(matcher, chain, erc20, Currency, address, item, CancellationToken.None);
                             continue;
                         }
                         //此交易已被其他订单使用
@@ -172,6 +177,8 @@ namespace TokenPay.BgServices
                             }
                         }
                     }
+                    var newest = result.Result.Max(x => long.TryParse(x.BlockNumber, out var block) ? block : 0);
+                    if (newest > 0) await cursors.AdvanceAsync(cursor, newest, result.Result.Max(x => x.DateTime), null, CancellationToken.None);
                 }
             }
         }

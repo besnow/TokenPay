@@ -18,6 +18,7 @@ namespace TokenPay.BgServices
         private readonly List<EVMChain> _chains;
         private readonly IFreeSql freeSql;
         private readonly IStaticPaymentMatcher matcher;
+        private readonly ChainScanCursorStore cursors;
         private bool UseDynamicAddress => _configuration.GetValue("UseDynamicAddress", true);
         private bool UseDynamicAddressAmountMove => _configuration.GetValue("DynamicAddressConfig:AmountMove", false);
         public OrderCheckEVMBaseService(ILogger<OrderCheckEVMBaseService> logger,
@@ -25,7 +26,7 @@ namespace TokenPay.BgServices
             IHostEnvironment env,
             Channel<TokenOrders> channel,
             List<EVMChain> Chains,
-            IFreeSql freeSql, IStaticPaymentMatcher matcher) : base("EVM基本币订单检测", TimeSpan.FromSeconds(15), logger)
+            IFreeSql freeSql, IStaticPaymentMatcher matcher, ChainScanCursorStore cursors) : base("EVM基本币订单检测", TimeSpan.FromSeconds(15), logger)
         {
             this._configuration = configuration;
             this._env = env;
@@ -33,6 +34,7 @@ namespace TokenPay.BgServices
             _chains = Chains;
             this.freeSql = freeSql;
             this.matcher = matcher;
+            this.cursors = cursors;
         }
 
         protected override async Task ExecuteAsync(DateTime RunTime, CancellationToken stoppingToken)
@@ -54,6 +56,8 @@ namespace TokenPay.BgServices
 
                     foreach (var address in Address)
                     {
+                        var cursor = await cursors.GetAsync(chain.ChainNameEN, Currency, address,
+                            _configuration.GetValue("StaticPaymentMatch:LatePaymentRetentionHours", 24), stoppingToken);
                         //查询此地址待支付订单
                         var orders = await _repository
                             .Where(x => x.Status == OrderStatus.Pending)
@@ -93,13 +97,13 @@ namespace TokenPay.BgServices
                         #endregion
 
                         #region 检查订单
-                        Func<EthTransaction, Task> CheckOrder = async (EthTransaction item) =>
+                        Func<EthTransaction, string, Task> CheckOrder = async (EthTransaction item, string transferKey) =>
                         {
                             var RealAmount = item.RealAmount(chain.Decimals);
                             if (!UseDynamicAddress)
                             {
-                                await matcher.ObserveAsync(new(chain.ChainNameEN, Currency, null, item.Hash, 0,
-                                    item.From, address, RealAmount, item.BlockNumber, item.DateTime, item.Confirmations), stoppingToken);
+                                await EvmTransferGuard.ObserveNativeAsync(matcher, chain, Currency, address, item,
+                                    transferKey.StartsWith("trace:", StringComparison.Ordinal), NowBlockNumber, stoppingToken);
                                 return;
                             }
                             var order = orders.Where(x => x.Amount == RealAmount && x.ToAddress.ToLower() == item.To.ToLower() && x.CreateTime < item.DateTime)
@@ -153,6 +157,7 @@ namespace TokenPay.BgServices
                             { "offset", 100 },
                             { "sort", "desc" }
                         };
+                        if (cursor.LastBlockNumber > 0) query.Add("startblock", Math.Max(0, cursor.LastBlockNumber - 12));
                         if (_env.IsProduction())
                             query.Add("apikey", chain.ApiKey);
 
@@ -179,11 +184,12 @@ namespace TokenPay.BgServices
                                 }
                                 //合约地址 方法id 是否错误 确认数
                                 if (!string.IsNullOrEmpty(item.ContractAddress) || item.MethodId != "0x"
-                                    || item.IsError != 0 || item.Confirmations < chain.Confirmations)
+                                    || item.IsError != 0 || item.TxreceiptStatus == 0 || item.Confirmations < chain.Confirmations
+                                    || !string.Equals(item.To, address, StringComparison.OrdinalIgnoreCase))
                                 {
                                     continue;
                                 }
-                                await CheckOrder(item);
+                                await CheckOrder(item, "native");
                             }
                         }
                         #endregion
@@ -199,6 +205,7 @@ namespace TokenPay.BgServices
                             { "offset", 100 },
                             { "sort", "desc" }
                         };
+                        if (cursor.LastBlockNumber > 0) queryInternal.Add("startblock", Math.Max(0, cursor.LastBlockNumber - 12));
                         if (_env.IsProduction())
                             queryInternal.Add("apikey", chain.ApiKey);
 
@@ -227,10 +234,14 @@ namespace TokenPay.BgServices
                                 {
                                     continue;
                                 }
-                                await CheckOrder(item);
+                                if (!string.Equals(item.To, address, StringComparison.OrdinalIgnoreCase)) continue;
+                                var traceKey = !string.IsNullOrWhiteSpace(item.TraceId) ? item.TraceId : item.TransactionIndex;
+                                await CheckOrder(item, $"trace:{traceKey}");
                             }
                         }
                         #endregion
+                        if (NowBlockNumber > 0)
+                            await cursors.AdvanceAsync(cursor, NowBlockNumber, DateTime.UtcNow, null, stoppingToken);
                     }
                 }
                 catch (Exception e)

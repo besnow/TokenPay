@@ -23,6 +23,9 @@ namespace TokenPay.Models.TronModel
         [JsonProperty("type")]
         public string Type { get; set; }
 
+        [JsonProperty("event_index")]
+        public int EventIndex { get; set; }
+
         [JsonProperty("value")]
         public decimal Value { get; set; }
         /// <summary>

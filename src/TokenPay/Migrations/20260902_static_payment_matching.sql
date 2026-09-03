@@ -15,12 +15,25 @@ ALTER TABLE TokenOrders ADD COLUMN MatchMethod INTEGER NULL;
 CREATE TABLE ChainPayment (
   Id TEXT NOT NULL PRIMARY KEY, Network TEXT NOT NULL, Asset TEXT NOT NULL,
   TokenContract TEXT NULL, TransactionHash TEXT NOT NULL, TransferIndex INTEGER NOT NULL,
+  TransferKey TEXT NOT NULL,
   FromAddress TEXT NULL, ToAddress TEXT NOT NULL, ActualAmount DECIMAL(38,18) NOT NULL,
   BlockNumber INTEGER NOT NULL, BlockTime TEXT NOT NULL, Confirmations INTEGER NOT NULL,
   FirstSeenTime TEXT NOT NULL, MatchStatus INTEGER NOT NULL, MatchedOrderId TEXT NULL,
   MatchMethod INTEGER NULL, MatchReason TEXT NULL
 );
-CREATE UNIQUE INDEX uk_chain_payment ON ChainPayment(Network, TransactionHash, TransferIndex);
+CREATE UNIQUE INDEX uk_chain_payment_key ON ChainPayment(Network, TransactionHash, TransferKey);
+CREATE TABLE PaymentClaim (
+  Id TEXT NOT NULL PRIMARY KEY, OrderId TEXT NOT NULL, ChainPaymentId TEXT NULL,
+  Network TEXT NOT NULL, TransactionHash TEXT NOT NULL, SubmittedAtUtc TEXT NOT NULL,
+  ClientIp TEXT NULL, ReviewStatus INTEGER NOT NULL, ReviewReason TEXT NULL,
+  EligibleOrderIds TEXT NULL, ReviewedAtUtc TEXT NULL, ReviewedBy TEXT NULL
+);
+CREATE UNIQUE INDEX uk_payment_claim ON PaymentClaim(OrderId, Network, TransactionHash);
+CREATE TABLE ChainScanCursor (
+  Id TEXT NOT NULL PRIMARY KEY, Network TEXT NOT NULL, Asset TEXT NOT NULL, Address TEXT NOT NULL,
+  LastBlockNumber INTEGER NOT NULL, LastBlockTimeUtc TEXT NOT NULL, ContinuationToken TEXT NULL, UpdatedAtUtc TEXT NOT NULL
+);
+CREATE UNIQUE INDEX uk_chain_scan_cursor ON ChainScanCursor(Network, Asset, Address);
 COMMIT;
 
 -- Application startup performs the configuration-dependent data migration when

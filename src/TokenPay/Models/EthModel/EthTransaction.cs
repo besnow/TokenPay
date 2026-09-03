@@ -3,7 +3,7 @@ using TokenPay.Extensions;
 
 namespace TokenPay.Models.EthModel
 {
-#pragma warning disable CS8618 // ÔÚÍË³ö¹¹Ôìº¯ÊýÊ±£¬²»¿ÉÎª null µÄ×Ö¶Î±ØÐë°üº¬·Ç null Öµ¡£Çë¿¼ÂÇÉùÃ÷Îª¿ÉÒÔÎª null¡£
+#pragma warning disable CS8618 // ï¿½ï¿½ï¿½Ë³ï¿½ï¿½ï¿½ï¿½ìº¯ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îª null ï¿½ï¿½ï¿½Ö¶Î±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ null Öµï¿½ï¿½ï¿½ë¿¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½Îª nullï¿½ï¿½
     public class EthTransaction
     {
         [JsonProperty("blockNumber")]
@@ -35,8 +35,11 @@ namespace TokenPay.Models.EthModel
         public decimal Value { get; set; }
         public decimal RealAmount(int decimals)
         {
-            return Value / (decimal)Math.Pow(10, decimals);
+            return Value / TokenPay.Helper.PaymentAmountCalculator.DecimalPower(decimals);
         }
+
+        [JsonProperty("traceId")]
+        public string? TraceId { get; set; }
 
         [JsonProperty("gas")]
         public decimal Gas { get; set; }
@@ -71,5 +74,5 @@ namespace TokenPay.Models.EthModel
         [JsonProperty("functionName")]
         public string FunctionName { get; set; }
     }
-#pragma warning restore CS8618 // ÔÚÍË³ö¹¹Ôìº¯ÊýÊ±£¬²»¿ÉÎª null µÄ×Ö¶Î±ØÐë°üº¬·Ç null Öµ¡£Çë¿¼ÂÇÉùÃ÷Îª¿ÉÒÔÎª null¡£
+#pragma warning restore CS8618 // ï¿½ï¿½ï¿½Ë³ï¿½ï¿½ï¿½ï¿½ìº¯ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îª null ï¿½ï¿½ï¿½Ö¶Î±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ null Öµï¿½ï¿½ï¿½ë¿¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Îªï¿½ï¿½ï¿½ï¿½Îª nullï¿½ï¿½
 }
