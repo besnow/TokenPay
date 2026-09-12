@@ -67,12 +67,27 @@ class TokenPay {
 
     public function notify($params)
     {
-        $sign = $params['Signature'];
+        $sign = isset($params['Signature']) ? $params['Signature'] : null;
+        if (!is_string($sign)) {
+            die('cannot pass verification');
+        }
         unset($params['Signature']);
-        ksort($params);
-        reset($params);
-        $str = stripslashes(urldecode(http_build_query($params))) . $this->config['token_pay_apitoken'];
-        if ($sign !== md5($str)) {
+        ksort($params, SORT_STRING);
+        $pairs = [];
+        foreach ($params as $key => $value) {
+            if ($value === null || $value === '') {
+                continue;
+            }
+            // TokenPay uses .NET Boolean.ToString(): True/False, not PHP's 1/0.
+            if (is_bool($value)) {
+                $value = $value ? 'True' : 'False';
+            } elseif (!is_scalar($value)) {
+                die('cannot pass verification');
+            }
+            $pairs[] = $key . '=' . $value;
+        }
+        $str = implode('&', $pairs) . $this->config['token_pay_apitoken'];
+        if (!hash_equals(md5($str), $sign)) {
             die('cannot pass verification');
         }
         $status = $params['Status'];
