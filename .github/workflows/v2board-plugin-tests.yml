@@ -1,0 +1,30 @@
+name: V2Board Plugin Tests
+
+on:
+  pull_request:
+    paths:
+      - 'Plugs/v2board/**'
+      - '.github/workflows/v2board-plugin-tests.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'Plugs/v2board/**'
+      - '.github/workflows/v2board-plugin-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  callback-signatures:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check PHP syntax
+        run: |
+          php -l Plugs/v2board/app/Payments/TokenPay.php
+          php -l Plugs/v2board/tests/callback_signature_test.php
+      - name: Verify callback signatures and tampering rejection
+        run: php Plugs/v2board/tests/callback_signature_test.php
